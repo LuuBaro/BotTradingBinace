@@ -1,0 +1,1 @@
+# Worker app - Trading engine

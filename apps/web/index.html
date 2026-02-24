@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trading Bot - Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 20px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        h1 { margin-bottom: 30px; color: #60a5fa; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .card {
+            background: #1e293b;
+            border-radius: 8px;
+            padding: 20px;
+            border: 1px solid #334155;
+        }
+        .card h2 { color: #94a3b8; font-size: 14px; margin-bottom: 10px; text-transform: uppercase; }
+        .card .value { font-size: 32px; font-weight: bold; margin: 10px 0; }
+        .card .label { color: #64748b; font-size: 12px; }
+        .status { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 12px; }
+        .status.running { background: #22c55e; color: white; }
+        .status.stopped { background: #ef4444; color: white; }
+        table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 8px; overflow: hidden; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #334155; }
+        th { background: #0f172a; color: #94a3b8; font-size: 12px; text-transform: uppercase; }
+        .event { padding: 10px; margin: 5px 0; background: #1e293b; border-left: 3px solid #3b82f6; border-radius: 4px; }
+        .event.error { border-left-color: #ef4444; }
+        .event .time { color: #64748b; font-size: 12px; }
+        .btn {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        .btn:hover { background: #2563eb; }
+        #ws-status { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-left: 10px; }
+        #ws-status.connected { background: #22c55e; }
+        #ws-status.disconnected { background: #ef4444; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 AI Trading Bot - Phase 1 Dashboard
+            <span id="ws-status" class="disconnected"></span>
+        </h1>
+
+        <div class="grid">
+            <div class="card">
+                <h2>Status</h2>
+                <div class="value"><span class="status running">Running</span></div>
+                <div class="label">Worker & API Active</div>
+            </div>
+            <div class="card">
+                <h2>Active Positions</h2>
+                <div class="value" id="positions-count">-</div>
+                <div class="label">Open positions</div>
+            </div>
+            <div class="card">
+                <h2>Total Decisions</h2>
+                <div class="value" id="decisions-count">-</div>
+                <div class="label">AI decisions made</div>
+            </div>
+            <div class="card">
+                <h2>Last Activity</h2>
+                <div class="value" id="last-activity">-</div>
+                <div class="label">Latest decision time</div>
+            </div>
+        </div>
+
+        <div style="margin-bottom: 20px;">
+            <button class="btn" onclick="refreshData()">🔄 Refresh Data</button>
+            <button class="btn" onclick="window.open('/docs', '_blank')">📚 API Docs</button>
+        </div>
+
+        <div class="card" style="margin-bottom: 20px;">
+            <h2>⚡ Recent Events</h2>
+            <div id="events-container">
+                <p style="color: #64748b;">Loading events...</p>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>📊 Active Positions</h2>
+            <table id="positions-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Side</th>
+                        <th>Quantity</th>
+                        <th>Entry Price</th>
+                        <th>Unrealized PnL</th>
+                        <th>Opened At</th>
+                    </tr>
+                </thead>
+                <tbody id="positions-body">
+                    <tr><td colspan="6" style="text-align: center; color: #64748b;">No positions</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+        const WS_URL = 'ws://localhost:8000/stream';
+        let ws = null;
+
+        // WebSocket connection
+        function connectWebSocket() {
+            ws = new WebSocket(WS_URL);
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                document.getElementById('ws-status').className = 'connected';
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'status') {
+                    updateDashboard(data.data);
+                }
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                document.getElementById('ws-status').className = 'disconnected';
+                setTimeout(connectWebSocket, 5000);
+            };
+        }
+
+        // Fetch data from API
+        async function fetchData(endpoint) {
+            try {
+                const response = await fetch(`${API_BASE}${endpoint}`);
+                return await response.json();
+            } catch (error) {
+                console.error('Fetch error:', error);
+                return null;
+            }
+        }
+
+        // Update dashboard
+        function updateDashboard(wsData) {
+            if (wsData.positions_count !== undefined) {
+                document.getElementById('positions-count').textContent = wsData.positions_count;
+            }
+        }
+
+        // Refresh all data
+        async function refreshData() {
+            // Fetch positions
+            const positionsData = await fetchData('/positions');
+            if (positionsData) {
+                const tbody = document.getElementById('positions-body');
+                if (positionsData.positions.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #64748b;">No positions</td></tr>';
+                } else {
+                    tbody.innerHTML = positionsData.positions.map(p => `
+                        <tr>
+                            <td><strong>${p.symbol}</strong></td>
+                            <td><span style="color: ${p.side === 'long' ? '#22c55e' : '#ef4444'}">${p.side.toUpperCase()}</span></td>
+                            <td>${p.qty}</td>
+                            <td>$${p.entry_price.toFixed(2)}</td>
+                            <td style="color: ${p.unrealized_pnl >= 0 ? '#22c55e' : '#ef4444'}">$${p.unrealized_pnl.toFixed(2)}</td>
+                            <td>${new Date(p.opened_at).toLocaleString()}</td>
+                        </tr>
+                    `).join('');
+                }
+                document.getElementById('positions-count').textContent = positionsData.positions.length;
+            }
+
+            // Fetch events
+            const eventsData = await fetchData('/events?limit=10');
+            if (eventsData) {
+                const container = document.getElementById('events-container');
+                if (eventsData.events.length === 0) {
+                    container.innerHTML = '<p style="color: #64748b;">No events</p>';
+                } else {
+                    container.innerHTML = eventsData.events.map(e => `
+                        <div class="event ${e.level === 'ERROR' ? 'error' : ''}">
+                            <div class="time">${new Date(e.timestamp).toLocaleTimeString()} | ${e.level}</div>
+                            <div><strong>${e.code}</strong>: ${e.message}</div>
+                        </div>
+                    `).join('');
+                }
+            }
+
+            // Fetch bot status
+            const statusData = await fetchData('/bot/status');
+            if (statusData) {
+                if (statusData.last_decision_at) {
+                    const lastTime = new Date(statusData.last_decision_at);
+                    document.getElementById('last-activity').textContent = lastTime.toLocaleTimeString();
+                }
+            }
+        }
+
+        // Initialize
+        connectWebSocket();
+        refreshData();
+        setInterval(refreshData, 10000); // Refresh every 10 seconds
+    </script>
+</body>
+</html>
