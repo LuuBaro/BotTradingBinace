@@ -196,6 +196,7 @@ class MockExchange:
         return {
             "asset": "USDT",
             "balance": self.balance,
+            "wallet_balance": self.balance,
             "available": self.balance,
         }
 

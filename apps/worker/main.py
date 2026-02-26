@@ -8,12 +8,19 @@ import sys
 import uuid
 import random
 from datetime import datetime
-from sqlalchemy import select
+from sqlalchemy import select, desc
 from packages.shared.config import settings
 from packages.shared.database import AsyncSessionFactory, init_db, close_db
-from packages.shared.models import BotConfig, Decision as DecisionModel, RiskLog, Position
-from packages.shared.schemas import RiskConfig, MarketSnapshot
+from packages.shared.models import (
+    BotConfig, 
+    Decision as DecisionModel, 
+    RiskLog, 
+    Position, 
+    Signal as SignalModel
+)
+from packages.shared.schemas import RiskConfig, MarketSnapshot, Decision as DecisionSchema
 from packages.shared.exchange.mock import MockExchange
+from packages.shared.exchange.binance_futures import BinanceFuturesClient
 from packages.shared.risk_engine import RiskEngine
 from packages.shared.logger import logger
 from apps.worker.agents.trader_stub import TraderStub
@@ -28,11 +35,25 @@ class TradingWorker:
 
     def __init__(self):
         self.running = False
-        self.exchange = MockExchange()
+        # Choose exchange based on configuration
+        if settings.binance_api_key and settings.binance_api_secret:
+            self.exchange = BinanceFuturesClient()
+            self.is_binance = True
+            logger.info(
+                "exchange_initialized",
+                type="binance",
+                testnet=settings.binance_testnet,
+            )
+        else:
+            self.exchange = MockExchange()
+            self.is_binance = False
+            logger.info("exchange_initialized", type="mock")
+        
         self.trader = TraderStub()
         self.execution_engine = ExecutionEngine(self.exchange)
         self.risk_engine: RiskEngine | None = None
         self.loop_count = 0
+        self.binance_session = None  # For Binance async client
 
     async def initialize(self) -> None:
         """Initialize worker"""
@@ -40,6 +61,16 @@ class TradingWorker:
         
         # Initialize database
         await init_db()
+        
+        # Initialize Binance client session if using Binance
+        if self.is_binance and not self.exchange.session:
+            import aiohttp
+            # Force ThreadedResolver to avoid DNS issues with aiodns on Windows
+            connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+            self.binance_session = aiohttp.ClientSession(connector=connector)
+            self.exchange.session = self.binance_session
+            await self.exchange.sync_server_time()
+            logger.info("binance_session_initialized")
         
         # Load risk config from database
         async with AsyncSessionFactory() as session:
@@ -69,6 +100,7 @@ class TradingWorker:
             try:
                 self.loop_count += 1
                 await self._execute_loop_iteration()
+                await self._process_pending_approvals()  # Process manual approvals
                 await asyncio.sleep(settings.worker_loop_interval_sec)
             except asyncio.CancelledError:
                 logger.info("worker_loop_cancelled")
@@ -84,8 +116,16 @@ class TradingWorker:
 
         async with AsyncSessionFactory() as session:
             try:
-                # Step 1: Generate mock market snapshot
-                snapshot = self._generate_mock_snapshot()
+                # Step 1: Get market snapshot (real from Binance or mock)
+                if self.is_binance:
+                    snapshot = await self._fetch_binance_snapshot()
+                    if not snapshot:
+                        # Fallback to mock if Binance fails
+                        snapshot = self._generate_mock_snapshot()
+                        logger.info("fallback_to_mock_snapshot")
+                else:
+                    snapshot = self._generate_mock_snapshot()
+                
                 logger.debug("market_snapshot_generated", symbol=snapshot.symbol, price=snapshot.close)
 
                 # Step 2: Get AI decision
@@ -98,6 +138,9 @@ class TradingWorker:
                     decision_json=decision.model_dump(),
                     confidence=decision.confidence,
                     regime=decision.regime.value,
+                    rationale=decision.rationale,
+                    checklist_results=[c.model_dump(by_alias=True) for c in decision.checklist],
+                    status="PENDING",
                 )
                 session.add(decision_record)
                 await session.flush()
@@ -108,7 +151,28 @@ class TradingWorker:
                     action=decision.action.value,
                     regime=decision.regime.value,
                     confidence=decision.confidence,
+                    rationale=decision.rationale[:50] + "..." if len(decision.rationale) > 50 else decision.rationale
                 )
+                
+                # Step 3b: AI Intelligence Analysis & Watchlist
+                try:
+                    analysis = await self.trader.get_analysis(snapshot)
+                    upcoming = analysis.get("upcoming_signals", [])
+                    for sig_data in upcoming:
+                        signal_record = SignalModel(
+                            timestamp=datetime.utcnow(),
+                            symbol=sig_data["symbol"],
+                            side=sig_data["side"],
+                            entry_zone=sig_data["entry_zone"],
+                            probability=sig_data["probability"],
+                            rationale=sig_data["rationale"],
+                            status="ACTIVE"
+                        )
+                        session.add(signal_record)
+                    
+                    logger.debug("ai_signals_updated", count=len(upcoming))
+                except Exception as ex:
+                    logger.warning("failed_to_process_signals", error=str(ex))
 
                 # Step 4: Risk validation
                 if self.risk_engine:
@@ -148,18 +212,41 @@ class TradingWorker:
                         approved=risk_result.approved,
                     )
 
+                    # Update decision record with risk results
+                    decision_record.risk_passed = risk_result.approved
+                    decision_record.risk_approval_reason = risk_result.reason
+                    decision_record.status = "APPROVED" if risk_result.approved else "REJECTED"
+                    await session.flush()
+
                     # Step 5: Execute if approved
                     if risk_result.approved:
-                        execution_result = await self.execution_engine.execute_decision(
-                            decision=decision,
-                            trace_id=trace_id,
-                            session=session,
+                        # Fetch current config to check for manual approval mode
+                        config_result = await session.execute(
+                            select(BotConfig).where(BotConfig.is_active == True).order_by(desc(BotConfig.version)).limit(1)
                         )
-                        logger.info(
-                            "execution_completed",
-                            trace_id=trace_id,
-                            result=execution_result.get("status"),
-                        )
+                        active_config = config_result.scalar_one_or_none()
+                        
+                        if active_config and active_config.approval_mode:
+                            logger.info("manual_approval_required", trace_id=trace_id)
+                            decision_record.status = "AWAITING_APPROVAL"
+                            await session.flush()
+                        else:
+                            execution_result = await self.execution_engine.execute_decision(
+                                decision=decision,
+                                trace_id=trace_id,
+                                session=session,
+                            )
+                            logger.info(
+                                "execution_completed",
+                                trace_id=trace_id,
+                                result=execution_result.get("status"),
+                            )
+                            # Update decision record with execution status
+                            decision_record.status = "EXECUTED" if execution_result.get("status") == "success" else "FAILED"
+                            decision_record.execution_status = execution_result.get("status")
+                            if execution_result.get("status") == "error":
+                                decision_record.execution_error = execution_result.get("error")
+                            await session.flush()
                     else:
                         logger.warning(
                             "decision_rejected_by_risk",
@@ -168,6 +255,10 @@ class TradingWorker:
                         )
 
                 await session.commit()
+                
+                # Step 6: Update all active positions PnL
+                await self._update_active_positions_pnl(snapshot)
+                
                 logger.info("loop_iteration_completed", loop_count=self.loop_count)
 
             except Exception as e:
@@ -179,6 +270,91 @@ class TradingWorker:
                     error=str(e),
                     exc_info=True,
                 )
+
+    async def _update_active_positions_pnl(self, snapshot: MarketSnapshot) -> None:
+        """Update unrealized PnL for all active positions in database"""
+        async with AsyncSessionFactory() as session:
+            try:
+                result = await session.execute(select(Position))
+                positions = result.scalars().all()
+                
+                if not positions:
+                    return
+
+                for pos in positions:
+                    # For now, we only update if symbol matches snapshot
+                    # In future, worker might fetch price for all symbols in positions
+                    if pos.symbol == snapshot.symbol:
+                        current_price = snapshot.close
+                        entry_price = float(pos.entry_price)
+                        qty = float(pos.qty)
+                        
+                        if pos.side.lower() == "long":
+                            unrealized_pnl = (current_price - entry_price) * qty
+                        else:
+                            unrealized_pnl = (entry_price - current_price) * qty
+                            
+                        pos.unrealized_pnl = unrealized_pnl
+                        pos.updated_at = datetime.utcnow()
+                
+                await session.commit()
+                logger.debug("positions_pnl_updated", count=len(positions))
+            except Exception as e:
+                logger.error("failed_to_update_positions_pnl", error=str(e))
+
+    async def _process_pending_approvals(self) -> None:
+        """Fetch and execute decisions that were manually approved"""
+        async with AsyncSessionFactory() as session:
+            try:
+                # Find decisions set to APPROVED_MANUALLY by API
+                result = await session.execute(
+                    select(DecisionModel).where(DecisionModel.status == "APPROVED_MANUALLY")
+                )
+                pending = result.scalars().all()
+                
+                if not pending:
+                    return
+
+                logger.info("processing_manual_approvals", count=len(pending))
+                
+                for decision_record in pending:
+                    try:
+                        trace_id = decision_record.trace_id
+                        logger.info("executing_manually_approved_decision", trace_id=trace_id)
+                        
+                        # Reconstruct decision schema
+                        decision_data = decision_record.decision_json
+                        # Fix for potential string JSON
+                        if isinstance(decision_data, str):
+                            import json
+                            decision_data = json.loads(decision_data)
+                            
+                        decision = DecisionSchema.model_validate(decision_data)
+                        
+                        # Execute
+                        execution_result = await self.execution_engine.execute_decision(
+                            decision=decision,
+                            trace_id=trace_id,
+                            session=session,
+                        )
+                        
+                        # Update status
+                        decision_record.status = "EXECUTED" if execution_result.get("status") == "success" else "FAILED"
+                        decision_record.execution_status = execution_result.get("status")
+                        if execution_result.get("status") == "error":
+                            decision_record.execution_error = execution_result.get("error")
+                            
+                        await session.commit()
+                        logger.info("manual_execution_completed", trace_id=trace_id, status=decision_record.status)
+                        
+                    except Exception as ex:
+                        logger.error("manual_execution_failed", trace_id=decision_record.trace_id, error=str(ex))
+                        decision_record.status = "FAILED"
+                        decision_record.execution_error = str(ex)
+                        await session.commit()
+                        
+            except Exception as e:
+                logger.error("failed_to_process_pending_approvals", error=str(e))
 
     def _generate_mock_snapshot(self) -> MarketSnapshot:
         """Generate mock market data"""
@@ -202,10 +378,69 @@ class TradingWorker:
             spread=random.uniform(0.5, 2.0),
         )
 
+    async def _fetch_binance_snapshot(self) -> MarketSnapshot | None:
+        """Fetch real market data from Binance Testnet"""
+        try:
+            # Get 1-minute klines for BTCUSDT
+            klines = await self.exchange.get_klines(
+                symbol="BTCUSDT",
+                interval="1m",
+                limit=1
+            )
+            
+            if not klines or len(klines) == 0:
+                logger.warning("no_klines_data_from_binance")
+                return None
+            
+            # Parse latest kline
+            latest_kline = klines[-1]
+            open_price = float(latest_kline[1])
+            high_price = float(latest_kline[2])
+            low_price = float(latest_kline[3])
+            close_price = float(latest_kline[4])
+            volume = float(latest_kline[7])
+            timestamp = int(latest_kline[0])
+            
+            # Get bid-ask spread from ticker
+            ticker = await self.exchange.get_ticker_price("BTCUSDT")
+            bid = float(ticker.get("bidPrice", close_price))
+            ask = float(ticker.get("askPrice", close_price))
+            spread = ask - bid if ask > bid else 0.1
+            
+            snapshot = MarketSnapshot(
+                symbol="BTCUSDT",
+                timestamp=datetime.utcfromtimestamp(timestamp / 1000),
+                open=open_price,
+                high=high_price,
+                low=low_price,
+                close=close_price,
+                volume=volume,
+                spread=spread,
+            )
+            
+            logger.debug(
+                "binance_snapshot_fetched",
+                symbol="BTCUSDT",
+                close=close_price,
+                volume=volume,
+            )
+            
+            return snapshot
+            
+        except Exception as e:
+            logger.warning("binance_snapshot_fetch_failed", error=str(e), exc_info=True)
+            return None
+
     async def shutdown(self) -> None:
         """Graceful shutdown"""
         logger.info("worker_shutting_down")
         self.running = False
+        
+        # Close Binance session if it was created
+        if self.binance_session:
+            await self.binance_session.close()
+            logger.info("binance_session_closed")
+        
         await close_db()
         logger.info("worker_shutdown_complete")
 
@@ -222,7 +457,10 @@ async def main():
         asyncio.create_task(worker.shutdown())
 
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
+        try:
+            loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
+        except NotImplementedError:
+            signal.signal(sig, lambda s, f: asyncio.create_task(worker.shutdown()))
 
     try:
         await worker.initialize()

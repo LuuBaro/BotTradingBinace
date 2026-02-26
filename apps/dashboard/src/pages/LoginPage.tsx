@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useAuthStore } from '../store'
-import { createApiClient } from '../api/client'
+import { createApiClient, getApiBaseUrl } from '../api/client'
 
 export const LoginPage: React.FC = () => {
   const [username, setUsername] = useState('')
@@ -15,7 +15,7 @@ export const LoginPage: React.FC = () => {
     setError('')
 
     try {
-      const api = createApiClient('http://localhost:8001/api')
+      const api = createApiClient(getApiBaseUrl())
       const response = await api.login(username, password)
 
       if (response.access_token) {

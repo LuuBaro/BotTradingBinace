@@ -31,10 +31,21 @@ export class ApiClient {
     )
   }
 
+  // Generic helpers
+  async get<T = any>(url: string) {
+    const res = await this.axiosInstance.get<T>(url)
+    return res
+  }
+
+  async post<T = any>(url: string, data?: any) {
+    const res = await this.axiosInstance.post<T>(url, data)
+    return res
+  }
+
   // Auth endpoints
   async login(username: string, password: string) {
     console.log('🔐 Attempting login with:', { username })
-    const res = await this.axiosInstance.post('/auth/login', {
+    const res = await this.axiosInstance.post('auth/login', {
       username,
       password,
     })
@@ -43,11 +54,11 @@ export class ApiClient {
   }
 
   async logout() {
-    return this.axiosInstance.post('/auth/logout')
+    return this.axiosInstance.post('auth/logout')
   }
 
   async refreshToken(token: string) {
-    const res = await this.axiosInstance.post('/auth/refresh', {
+    const res = await this.axiosInstance.post('auth/refresh', {
       token,
     })
     return res.data
@@ -55,107 +66,175 @@ export class ApiClient {
 
   // Dashboard endpoints
   async getBotStatus() {
-    const res = await this.axiosInstance.get('/bot/status')
+    const res = await this.axiosInstance.get('bot/status')
     return res.data
   }
 
   async getPositions() {
-    const res = await this.axiosInstance.get('/positions')
+    const res = await this.axiosInstance.get('positions')
     return res.data
   }
 
   async getOrders() {
-    const res = await this.axiosInstance.get('/orders')
+    const res = await this.axiosInstance.get('orders')
+    return res.data
+  }
+
+  async closePosition(symbol: string) {
+    const res = await this.axiosInstance.post(`positions/${symbol}/close`)
+    return res.data
+  }
+
+  async openPosition(payload: { symbol: string, side: string, leverage: number, size_pct: number }) {
+    const res = await this.axiosInstance.post('positions/open', payload)
+    return res.data
+  }
+
+  async getSignals(limit = 50) {
+    const res = await this.axiosInstance.get(`signals?limit=${limit}`)
     return res.data
   }
 
   async getDecisions(limit = 100) {
-    const res = await this.axiosInstance.get(`/decisions?limit=${limit}`)
+    const res = await this.axiosInstance.get(`decisions?limit=${limit}`)
+    return res.data
+  }
+
+  async getWalletBalance() {
+    const res = await this.axiosInstance.get('wallet/balance')
     return res.data
   }
 
   async getDecisionTrace(traceId: string) {
-    const res = await this.axiosInstance.get(`/decisions/${traceId}`)
+    const res = await this.axiosInstance.get(`decisions/${traceId}`)
     return res.data
   }
 
   async getReconSummary() {
-    const res = await this.axiosInstance.get('/recon/summary')
+    const res = await this.axiosInstance.get('recon/summary')
     return res.data
   }
 
   async getLatencyMetrics() {
-    const res = await this.axiosInstance.get('/health/latency')
+    const res = await this.axiosInstance.get('health/latency')
     return res.data
   }
 
   async getHealthStatus() {
-    const res = await this.axiosInstance.get('/health/status')
+    const res = await this.axiosInstance.get('health/status')
+    return res.data
+  }
+
+  async getPnlHistory(days = 7) {
+    const res = await this.axiosInstance.get(`reports/pnl-history?days=${days}`)
     return res.data
   }
 
   // Config endpoints
   async getRiskConfig() {
-    const res = await this.axiosInstance.get('/config/risk')
+    const res = await this.axiosInstance.get('config/risk')
     return res.data
   }
 
   async updateRiskConfig(config: Record<string, any>) {
-    const res = await this.axiosInstance.post('/config/risk', config)
+    const res = await this.axiosInstance.post('config/risk', config)
     return res.data
   }
 
   async getRiskConfigVersions() {
-    const res = await this.axiosInstance.get('/config/risk/versions')
+    const res = await this.axiosInstance.get('config/risk/versions')
     return res.data
   }
 
   async rollbackRiskConfig(versionId: string) {
-    const res = await this.axiosInstance.post(`/config/risk/rollback/${versionId}`)
+    const res = await this.axiosInstance.post(`config/risk/rollback/${versionId}`)
     return res.data
   }
 
   // Audit endpoints
   async getAuditLog(limit = 100, offset = 0) {
     const res = await this.axiosInstance.get(
-      `/audit?limit=${limit}&offset=${offset}`
+      `audit?limit=${limit}&offset=${offset}`
     )
     return res.data
   }
 
   // Control endpoints
   async pauseTrading() {
-    return this.axiosInstance.post('/actions/pause')
+    return this.axiosInstance.post('actions/pause')
   }
 
   async resumeTrading() {
-    return this.axiosInstance.post('/actions/resume')
+    return this.axiosInstance.post('actions/resume')
   }
 
   async syncNow() {
-    return this.axiosInstance.post('/actions/sync_now')
+    return this.axiosInstance.post('actions/sync_now')
+  }
+
+  async getActionsStatus() {
+    const res = await this.axiosInstance.get('actions/status')
+    return res.data
+  }
+
+  async updateApprovalMode(enabled: boolean) {
+    const res = await this.axiosInstance.post(`actions/approval-mode?enabled=${enabled}`)
+    return res.data
+  }
+
+  async approveDecision(traceId: string) {
+    const res = await this.axiosInstance.post(`actions/approve-decision/${traceId}`)
+    return res.data
   }
 
   // Prompt packs endpoints
   async getPromptPacks() {
-    const res = await this.axiosInstance.get('/prompt-packs')
+    const res = await this.axiosInstance.get('prompt-packs')
     return res.data
   }
 
   async uploadPromptPack(file: File) {
     const formData = new FormData()
     formData.append('file', file)
-    const res = await this.axiosInstance.post('/prompt-packs/upload', formData, {
+    const res = await this.axiosInstance.post('prompt-packs/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
     return res.data
   }
 
   async activatePromptPack(packId: string) {
-    return this.axiosInstance.post(`/prompt-packs/${packId}/activate`)
+    return this.axiosInstance.post(`prompt-packs/${packId}/activate`)
+  }
+
+  // Settings endpoints
+  async getSettings() {
+    const res = await this.axiosInstance.get('settings')
+    return res.data
+  }
+
+  async updateSettings(payload: Record<string, any>) {
+    const res = await this.axiosInstance.put('settings', payload)
+    return res.data
+  }
+
+  async testBinance() {
+    const res = await this.axiosInstance.post('settings/test/binance')
+    return res.data
+  }
+
+  async testTelegram() {
+    const res = await this.axiosInstance.post('settings/test/telegram')
+    return res.data
   }
 }
 
-export const createApiClient = (baseURL: string, token?: string) => {
-  return new ApiClient({ baseURL, token })
+export const getApiBaseUrl = () => {
+  const envUrl = (import.meta as any).env.VITE_API_BASE_URL
+  return envUrl && envUrl.trim().length > 0
+    ? envUrl
+    : 'http://localhost:8000/api/'
+}
+
+export const createApiClient = (baseURL?: string, token?: string) => {
+  return new ApiClient({ baseURL: baseURL ?? getApiBaseUrl(), token })
 }

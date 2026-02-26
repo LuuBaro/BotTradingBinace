@@ -7,6 +7,7 @@ import asyncio
 from datetime import datetime
 from typing import Union
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from packages.shared.schemas import Decision, OrderIntent
 from packages.shared.enums import ActionType, OrderStatus, OrderType, Side, IntentStatus
@@ -16,10 +17,25 @@ from packages.shared.models import (
     Position as PositionModel,
     Event as EventModel,
     AuditLog as AuditLogModel,
+    TradeJournal as TradeJournalModel,
 )
+from packages.shared.trade_journal import ExitReason
 from packages.shared.exchange.mock import MockExchange
 from packages.shared.exchange.binance_futures import BinanceFuturesClient
 from packages.shared.logger import logger
+
+
+async def _commit_with_retry(session: AsyncSession, retries: int = 3, delay: float = 0.3) -> None:
+    for attempt in range(1, retries + 1):
+        try:
+            await session.commit()
+            return
+        except OperationalError as exc:
+            await session.rollback()
+            if attempt == retries:
+                raise
+            logger.warning("db_commit_retry", attempt=attempt, error=str(exc))
+            await asyncio.sleep(delay)
 
 
 class ExecutionEngine:
@@ -130,6 +146,18 @@ class ExecutionEngine:
             
             position_value = balance * decision.size_pct * decision.leverage
             quantity = position_value / entry_price
+
+            # Round quantity and price for Binance
+            if self.is_binance:
+                symbol_info = await self.exchange.get_symbol_info(decision.symbol)
+                if symbol_info:
+                    quantity = self.exchange.round_quantity(symbol_info, quantity)
+                    if decision.entry_price:
+                        decision.entry_price = self.exchange.round_price(symbol_info, decision.entry_price)
+                    if decision.stop_loss:
+                        decision.stop_loss = self.exchange.round_price(symbol_info, decision.stop_loss)
+                    if decision.take_profit:
+                        decision.take_profit = self.exchange.round_price(symbol_info, decision.take_profit)
 
             # Place order on exchange
             if self.is_binance:
@@ -243,7 +271,7 @@ class ExecutionEngine:
             )
             session.add(audit)
 
-            await session.commit()
+            await _commit_with_retry(session)
 
             logger.info(
                 "position_opened",
@@ -264,7 +292,7 @@ class ExecutionEngine:
         except Exception as e:
             # Mark intent as failed
             intent.status = IntentStatus.FAILED.value
-            await session.commit()
+            await _commit_with_retry(session)
             
             logger.error(
                 "execution_failed",
@@ -310,10 +338,21 @@ class ExecutionEngine:
                 qty=filled_order["filled_qty"],
                 entry_price=filled_order["avg_price"],
                 unrealized_pnl=0.0,
+                stop_loss=decision.stop_loss,
+                take_profit=decision.take_profit,
                 opened_at=datetime.utcnow(),
                 updated_at=datetime.utcnow(),
             )
             session.add(position)
+            logger.info(
+                "position_record_created",
+                trace_id=trace_id,
+                symbol=decision.symbol,
+                side=decision.side.value,
+                qty=filled_order["filled_qty"],
+                entry_price=filled_order["avg_price"],
+                message="Position added to session, pending commit"
+            )
         else:
             # Update existing position (add to position)
             position.qty += filled_order["filled_qty"]
@@ -331,6 +370,13 @@ class ExecutionEngine:
         try:
             sl_client_order_id = f"SL_{trace_id[:8]}_{decision.symbol}"
             
+            # Round quantity and stop_price for Binance
+            if self.is_binance:
+                symbol_info = await self.exchange.get_symbol_info(decision.symbol)
+                if symbol_info:
+                    quantity = self.exchange.round_quantity(symbol_info, quantity)
+                    decision.stop_loss = self.exchange.round_price(symbol_info, decision.stop_loss)
+
             # Place SL order on exchange
             if self.is_binance:
                 sl_order = await self.exchange.place_order(
@@ -388,6 +434,13 @@ class ExecutionEngine:
         try:
             tp_client_order_id = f"TP_{trace_id[:8]}_{decision.symbol}"
             
+            # Round quantity and stop_price for Binance
+            if self.is_binance:
+                symbol_info = await self.exchange.get_symbol_info(decision.symbol)
+                if symbol_info:
+                    quantity = self.exchange.round_quantity(symbol_info, quantity)
+                    decision.take_profit = self.exchange.round_price(symbol_info, decision.take_profit)
+
             # Place TP order on exchange
             if self.is_binance:
                 tp_order = await self.exchange.place_order(
@@ -497,6 +550,98 @@ class ExecutionEngine:
             )
             close_order_id = close_order["order_id"]
 
+        # Determine exit price
+        if self.is_binance:
+            await asyncio.sleep(0.2)
+            order_info = await self.exchange.get_order(
+                symbol=decision.symbol,
+                client_order_id=client_order_id,
+            )
+            exit_price = float(order_info.get("avgPrice", 0)) if order_info else 0.0
+            if exit_price <= 0:
+                mark = await self.exchange.get_mark_price(decision.symbol)
+                exit_price = float(mark.get("markPrice", 0))
+        else:
+            await asyncio.sleep(0.5)
+            order_info = await self.exchange.get_order(close_order_id)
+            exit_price = float(order_info.get("avg_price") or 0.0)
+            if exit_price <= 0:
+                exit_price = float(self.exchange.get_mark_price(decision.symbol))
+
+        # Compute trade metrics
+        entry_price = float(position.entry_price)
+        qty = float(position.qty)
+        side = position.side
+        exit_time = datetime.utcnow()
+        entry_time = position.opened_at
+        holding_time_sec = int((exit_time - entry_time).total_seconds()) if entry_time else 0
+
+        if side.lower() == Side.LONG.value:
+            pnl = (exit_price - entry_price) * qty
+        else:
+            pnl = (entry_price - exit_price) * qty
+
+        denom = abs(entry_price * qty)
+        pnl_pct = (pnl / denom) if denom > 0 else 0.0
+
+        if decision.stop_loss and decision.take_profit and entry_price > 0:
+            rr = abs(decision.take_profit - entry_price) / max(abs(entry_price - decision.stop_loss), 1e-9)
+            stop_loss_pips = abs(entry_price - decision.stop_loss)
+            take_profit_pips = abs(decision.take_profit - entry_price)
+        else:
+            rr = 1.0
+            stop_loss_pips = 0.0
+            take_profit_pips = 0.0
+
+        # Estimate position size %
+        if self.is_binance:
+            balance_info = await self.exchange.get_account_balance()
+            usdt_balance = next(
+                (b for b in balance_info if b["asset"] == "USDT"),
+                {"balance": "0"}
+            )
+            balance = float(usdt_balance.get("balance", 0))
+        else:
+            balance_info = await self.exchange.get_balance()
+            balance = float(balance_info.get("balance", 0))
+
+        position_value = abs(entry_price * qty)
+        position_pct = (position_value / balance) if balance > 0 else 0.0
+
+        trade = TradeJournalModel(
+            trace_id=trace_id,
+            symbol=decision.symbol,
+            side=side,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            pnl=pnl,
+            rr=rr,
+            holding_time=holding_time_sec,
+            regime=getattr(decision.regime, "value", str(decision.regime)),
+            features_json={
+                "entry_time": entry_time.isoformat() if entry_time else None,
+                "exit_time": exit_time.isoformat(),
+                "entry_quantity": qty,
+                "entry_leverage": float(getattr(decision, "leverage", 1)),
+                "volatility_percentile": 50,
+                "bid_ask_spread_pips": 0.5,
+                "funding_rate": 0.0,
+                "position_pct": position_pct,
+                "stop_loss_pips": stop_loss_pips,
+                "take_profit_pips": take_profit_pips,
+                "confidence": float(getattr(decision, "confidence", 0.0)),
+                "ai_model": "mock" if not self.is_binance else "binance",
+                "prompt_pack_version": 1,
+                "pnl_pct": pnl_pct,
+                "max_drawdown": 0.0,
+                "max_runup": 0.0,
+            },
+            decision_json=decision.model_dump(),
+            exit_reason=ExitReason.MANUAL.value,
+            closed_at=exit_time,
+        )
+        session.add(trade)
+
         # Delete position
         await session.delete(position)
 
@@ -511,7 +656,7 @@ class ExecutionEngine:
         )
         session.add(event)
 
-        await session.commit()
+        await _commit_with_retry(session)
 
         logger.info("position_closed", trace_id=trace_id, symbol=decision.symbol)
 

@@ -135,6 +135,6 @@ class DemoUserManager:
 
 # Global instances
 jwt_handler = JWTHandler(
-    secret_key=settings.llm_api_key or "demo-secret-key-change-in-production"
+    secret_key=settings.jwt_secret or "demo-secret-key-change-in-production"
 )
 user_manager = DemoUserManager()

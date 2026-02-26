@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # API Configuration
     API_HOST: str = "0.0.0.0"
-    API_PORT: int = 8000
+    API_PORT: int = 8001
     API_WORKERS: int = 4
     API_TIMEOUT: int = 30
     CORS_ORIGINS: str = "http://localhost:3000"

@@ -36,6 +36,7 @@ export interface BotStatus {
   paused: boolean
   total_positions: number
   total_orders: number
+  approval_mode: boolean
 }
 
 export interface Position {
@@ -47,6 +48,10 @@ export interface Position {
   stop_loss: number | null
   take_profit: number | null
   leverage: number
+  side: 'long' | 'short'
+  margin_type: string
+  liquidation_price: number | null
+  opened_at: string
 }
 
 export interface Order {
@@ -54,8 +59,12 @@ export interface Order {
   symbol: string
   side: 'BUY' | 'SELL'
   quantity: number
+  filled_qty: number
+  avg_price: number | null
   status: string
+  order_type: string
   created_at: string
+  updated_at: string
 }
 
 export interface Decision {
@@ -75,12 +84,14 @@ export interface DashboardState {
   latency: { ws_p95: number; rest_p95: number; clock_skew: number } | null
   health: Record<string, any> | null
   pnlToday: number
+  decisions: Decision[]
   setBotStatus: (status: BotStatus) => void
   setPositions: (positions: Position[]) => void
   setOrders: (orders: Order[]) => void
   setLatency: (latency: any) => void
   setHealth: (health: any) => void
   setPnlToday: (pnl: number) => void
+  setDecisions: (decisions: Decision[]) => void
   updatePosition: (position: Position) => void
   updateOrder: (order: Order) => void
 }
@@ -92,12 +103,14 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   latency: null,
   health: null,
   pnlToday: 0,
+  decisions: [],
   setBotStatus: (status) => set({ botStatus: status }),
   setPositions: (positions) => set({ positions }),
   setOrders: (orders) => set({ orders }),
   setLatency: (latency) => set({ latency }),
   setHealth: (health) => set({ health }),
   setPnlToday: (pnl) => set({ pnlToday: pnl }),
+  setDecisions: (decisions) => set({ decisions }),
   updatePosition: (position) =>
     set((state) => ({
       positions: state.positions.map((p) => (p.id === position.id ? position : p)),

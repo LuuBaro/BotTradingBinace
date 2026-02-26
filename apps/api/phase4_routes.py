@@ -7,12 +7,30 @@ from fastapi.security import HTTPBearer
 from pydantic import BaseModel
 from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
+from pathlib import Path
+from dotenv import set_key
+from datetime import datetime
+import httpx
+import uuid
 
 from packages.shared.database import AsyncSessionFactory
 from packages.shared.logger import logger
+from packages.shared.config import settings
+from packages.shared.config_versioning import ConfigVersionManager
+from packages.shared.models import (
+    Decision, 
+    Order, 
+    Position, 
+    TradeJournal, 
+    Event, 
+    Signal, 
+    BotConfig, 
+    RiskLog
+)
+from sqlalchemy import select, func, desc
 from apps.api.auth import jwt_handler, user_manager, Token
 from apps.api.websocket import ws_manager, WsStreamConnection
-from packages.shared.config_versioning import ConfigVersionManager
 
 
 # Request models
@@ -23,6 +41,57 @@ class LoginRequest(BaseModel):
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 security = HTTPBearer()
+
+ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+
+
+def _mask_secret(value: str | None) -> str:
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return "****"
+    return f"{value[:2]}***{value[-2:]}"
+
+
+def _serialize_settings(mask_secrets: bool = True) -> dict:
+    return {
+        "env": settings.env,
+        "api_host": settings.api_host,
+        "api_port": settings.api_port,
+        "db_url": settings.db_url,
+        "binance_testnet": settings.binance_testnet,
+        "binance_api_key": _mask_secret(settings.binance_api_key) if mask_secrets else settings.binance_api_key,
+        "binance_api_secret": _mask_secret(settings.binance_api_secret) if mask_secrets else settings.binance_api_secret,
+        "telegram_bot_token": _mask_secret(settings.telegram_bot_token) if mask_secrets else settings.telegram_bot_token,
+        "telegram_admin_ids": settings.telegram_admin_ids,
+        "telegram_trader_ids": settings.telegram_trader_ids,
+        "selected_llm": settings.selected_llm,
+        "openai_api_key": _mask_secret(settings.openai_api_key) if mask_secrets else settings.openai_api_key,
+        "openai_model": settings.openai_model,
+        "anthropic_api_key": _mask_secret(settings.anthropic_api_key) if mask_secrets else settings.anthropic_api_key,
+        "anthropic_model": settings.anthropic_model,
+        "use_local_llm": settings.use_local_llm,
+    }
+
+
+class SettingsUpdate(BaseModel):
+    env: str | None = None
+    api_host: str | None = None
+    api_port: int | None = None
+    db_url: str | None = None
+    binance_testnet: bool | None = None
+    binance_api_key: str | None = None
+    binance_api_secret: str | None = None
+    telegram_bot_token: str | None = None
+    telegram_admin_ids: str | None = None
+    telegram_trader_ids: str | None = None
+    selected_llm: str | None = None
+    openai_api_key: str | None = None
+    openai_model: str | None = None
+    anthropic_api_key: str | None = None
+    anthropic_model: str | None = None
+    use_local_llm: bool | None = None
+    persist: str | None = "both"  # env|db|both
 
 
 # ===== Authentication Endpoints =====
@@ -87,19 +156,107 @@ async def refresh_token(token: str, credentials: Any = Depends(security)):
 
 @router.get("/bot/status")
 async def get_bot_status(credentials: Any = Depends(security)):
-    """Get bot status"""
+    """Get bot configuration and status from database"""
     user = jwt_handler.verify_token(credentials.credentials)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # TODO: Connect to actual worker state
-    return {
-        "mode": "BINANCE",
-        "uptime_seconds": 3600,
-        "paused": False,
-        "total_positions": 5,
-        "total_orders": 12,
-    }
+    async with AsyncSessionFactory() as db:
+        # Get active config
+        result = await db.execute(
+            select(BotConfig).where(BotConfig.is_active == True).order_by(desc(BotConfig.id))
+        )
+        config = result.scalar_one_or_none()
+
+        if not config:
+            # Fallback for fresh DB
+            return {
+                "mode": "Demo",
+                "uptime_seconds": 0,
+                "paused": False,
+                "total_positions": 0,
+                "total_orders": 0,
+            }
+
+        # Get last decision
+        last_decision_result = await db.execute(
+            select(Decision).order_by(desc(Decision.timestamp)).limit(1)
+        )
+        last_decision = last_decision_result.scalar_one_or_none()
+
+        # Count positions & orders
+        positions_result = await db.execute(select(func.count()).select_from(Position))
+        positions_count = positions_result.scalar() or 0
+
+        orders_result = await db.execute(select(func.count()).select_from(Order))
+        orders_count = orders_result.scalar() or 0
+
+        # Calculate uptime (since first config or first decision if config is old)
+        uptime_seconds = int((datetime.utcnow() - config.created_at).total_seconds())
+        
+        # Calculate daily realized PnL
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        pnl_result = await db.execute(
+            select(func.sum(TradeJournal.pnl))
+            .where(TradeJournal.closed_at >= today_start)
+        )
+        realized_pnl = float(pnl_result.scalar() or 0.0)
+
+        # Determine mode
+        mode = "Live" if (settings.binance_api_key and settings.binance_api_secret) else "Demo"
+
+        return {
+            "env": config.env,
+            "version": config.version,
+            "mode": mode,
+            "testnet": settings.binance_testnet,
+            "symbols": config.symbols_json,
+            "risk_config": config.risk_json,
+            "active_positions": positions_count,
+            "last_decision_at": last_decision.timestamp.isoformat() if last_decision else None,
+            "created_at": config.created_at.isoformat(),
+            "uptime_seconds": uptime_seconds,
+            "paused": config.is_active is False, # Or check global state
+            "total_positions": positions_count,
+            "total_orders": orders_count,
+            "realized_pnl_today": realized_pnl,
+        }
+
+
+@router.get("/events")
+async def get_events(
+    limit: int = 100,
+    level: str | None = None,
+    credentials: Any = Depends(security)
+):
+    """Get system events from database"""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    async with AsyncSessionFactory() as db:
+        query = select(Event).order_by(desc(Event.timestamp))
+        if level:
+            query = query.where(Event.level == level.upper())
+        query = query.limit(limit)
+        
+        result = await db.execute(query)
+        events = result.scalars().all()
+
+        return {
+            "events": [
+                {
+                    "id": e.id,
+                    "timestamp": e.timestamp.isoformat(),
+                    "level": e.level,
+                    "code": e.code,
+                    "message": e.message,
+                    "trace_id": e.trace_id,
+                    "data": e.data_json,
+                }
+                for e in events
+            ]
+        }
 
 
 @router.get("/health/status")
@@ -175,6 +332,8 @@ async def update_risk_config(
     if not user or user.role != "admin":
         raise HTTPException(status_code=403, detail="Forbidden")
 
+    logger.info("update_risk_config", user=user.username, config=config)
+
     async with AsyncSessionFactory() as session:
         manager = ConfigVersionManager(session)
         version = await manager.create_version(
@@ -183,7 +342,7 @@ async def update_risk_config(
             created_by=user.username,
             description=f"Updated by {user.username}",
         )
-
+        logger.info("risk_config_saved", version_id=version.id, config=config)
         return config
 
 
@@ -253,31 +412,62 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None):
 
 @router.get("/positions")
 async def get_positions(credentials: Any = Depends(security)):
-    """Get all positions"""
+    """Get all positions with latest AI rationale"""
     user = jwt_handler.verify_token(credentials.credentials)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     async with AsyncSessionFactory() as session:
-        from sqlalchemy import select
-        from packages.shared.models import Position
+        from sqlalchemy import select, desc
+        from packages.shared.models import Position, Decision
 
         result = await session.execute(select(Position))
         positions = result.scalars().all()
+        logger.info("positions_retrieved", count=len(positions))
 
-        return [
-            {
+        pos_list = []
+        for p in positions:
+            # Try to find the latest decision for this symbol
+            # Note: Using json_extract for SQLite if needed, but here we can just fetch last decisions and filter in python for simplicity if few records,
+            # or use a more efficient query. For now, let's fetch the latest decision for this symbol.
+            decision_result = await session.execute(
+                select(Decision)
+                .order_by(desc(Decision.timestamp))
+                .limit(20) # Check last 20 decisions
+            )
+            decisions = decision_result.scalars().all()
+            
+            # Simple match in python since we don't have a symbol column in Decision yet
+            latest_decision = None
+            for d in decisions:
+                if d.decision_json.get('symbol') == p.symbol:
+                    latest_decision = d
+                    break
+            
+            pos_data = {
                 "id": str(p.id),
                 "symbol": p.symbol,
-                "qty": p.qty,
+                "side": p.side,
+                "qty": float(p.qty),
                 "entry_price": float(p.entry_price),
-                "unrealized_pnl": float(p.unrealized_pnl) if p.unrealized_pnl else 0,
+                "unrealized_pnl": float(p.unrealized_pnl) if p.unrealized_pnl else 0.0,
+                "leverage": int(p.leverage) if p.leverage else 1,
+                "margin_type": p.margin_type or "CROSSED",
+                "sl_order_id": p.sl_order_id,
+                "tp_order_id": p.tp_order_id,
                 "stop_loss": float(p.stop_loss) if p.stop_loss else None,
                 "take_profit": float(p.take_profit) if p.take_profit else None,
-                "leverage": float(p.leverage) if p.leverage else 1,
+                "liquidation_price": float(p.liquidation_price) if p.liquidation_price else None,
+                "opened_at": p.opened_at.isoformat() if p.opened_at else None,
+                "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+                # Add AI fields
+                "rationale": latest_decision.rationale if latest_decision else None,
+                "regime": latest_decision.regime if latest_decision else None,
+                "confidence": float(latest_decision.confidence) if latest_decision else 0.85,
             }
-            for p in positions
-        ]
+            pos_list.append(pos_data)
+
+        return pos_list
 
 
 @router.get("/orders")
@@ -299,10 +489,13 @@ async def get_orders(credentials: Any = Depends(security)):
                 "id": str(o.id),
                 "symbol": o.symbol,
                 "side": o.side,
+                "order_type": o.order_type,
                 "quantity": float(o.quantity),
+                "filled_qty": float(o.filled_qty),
                 "status": o.status,
                 "avg_price": float(o.avg_price) if o.avg_price else 0,
                 "created_at": o.created_at.isoformat() if o.created_at else None,
+                "updated_at": o.updated_at.isoformat() if o.updated_at else None,
             }
             for o in orders
         ]
@@ -338,6 +531,7 @@ async def get_decisions(
                 "regime": d.regime,
                 "timestamp": d.timestamp.isoformat(),
                 "trace_id": d.trace_id,
+                "decision_json": d.decision_json,  # ✅ Include full JSON
             }
             for d in decisions
         ]
@@ -376,10 +570,19 @@ async def get_decision_trace(
 
         return {
             "trace_id": trace_id,
-            "decision_json": decision.decision_json,
-            "confidence": float(decision.confidence),
-            "risk_passed": decision.risk_passed,
-            "order_id": decision.order_id,
+            "decision": {
+                "id": decision.id,
+                "timestamp": decision.timestamp.isoformat(),
+                "trace_id": decision.trace_id,
+                "decision_json": decision.decision_json,
+                "confidence": float(decision.confidence),
+                "regime": decision.regime,
+                "status": decision.status,
+                "risk_passed": decision.risk_passed,
+                "risk_approval_reason": decision.risk_approval_reason,
+                "execution_status": decision.execution_status,
+                "execution_error": decision.execution_error,
+            },
             "events": [
                 {
                     "timestamp": e.timestamp.isoformat(),
@@ -392,20 +595,84 @@ async def get_decision_trace(
         }
 
 
-@router.get("/recon/summary")
-async def get_recon_summary(credentials: Any = Depends(security)):
-    """Get reconciliation summary"""
+@router.get("/signals")
+async def get_signals(
+    limit: int = 20,
+    credentials: Any = Depends(security)
+):
+    """Get active AI watchlist signals"""
     user = jwt_handler.verify_token(credentials.credentials)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # TODO: Connect to actual reconciliation state
-    return {
-        "last_sync": "2024-01-15T12:00:00Z",
-        "total_mismatches": 0,
-        "position_mismatches": 0,
-        "order_mismatches": 0,
-    }
+    async with AsyncSessionFactory() as session:
+        result = await session.execute(
+            select(Signal).where(Signal.status == "ACTIVE").order_by(desc(Signal.timestamp)).limit(limit)
+        )
+        signals = result.scalars().all()
+
+        return {
+            "signals": [
+                {
+                    "id": s.id,
+                    "timestamp": s.timestamp.isoformat(),
+                    "symbol": s.symbol,
+                    "side": s.side,
+                    "entry_zone": s.entry_zone,
+                    "probability": s.probability,
+                    "rationale": s.rationale,
+                    "status": s.status,
+                }
+                for s in signals
+            ]
+        }
+
+
+@router.get("/reports/pnl-history")
+async def get_pnl_history(
+    days: int = 7,
+    credentials: Any = Depends(security)
+):
+    """Get PnL history for chart visualization"""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    async with AsyncSessionFactory() as session:
+        from sqlalchemy import select, func
+        from packages.shared.models import TradeJournal
+        from datetime import datetime, timedelta
+
+        since = datetime.utcnow() - timedelta(days=days)
+        
+        # Get closed trades aggregated by hour
+        result = await session.execute(
+            select(
+                func.strftime('%Y-%m-%d %H:00:00', TradeJournal.closed_at).label('hour'),
+                func.sum(TradeJournal.pnl).label('pnl')
+            )
+            .where(TradeJournal.closed_at >= since)
+            .group_by('hour')
+            .order_by('hour')
+        )
+        history = result.all()
+
+        if not history:
+            # If no history, return some empty but structured data
+            return []
+
+        # Convert to list of dicts and calculate cumulative pnl if needed
+        # But for "velocity map", maybe just daily/hourly sums
+        return [
+            {
+                "time": h.hour,
+                "pnl": float(h.pnl)
+            }
+            for h in history
+        ]
+
+
+@router.get("/recon/summary")
 
 
 @router.get("/audit")
@@ -441,6 +708,161 @@ async def get_audit_log(
             }
             for l in logs
         ]
+
+
+# ===== Settings & Environment =====
+
+@router.get("/settings")
+async def get_settings(credentials: Any = Depends(security)):
+    """Get runtime settings and DB status"""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    async with AsyncSessionFactory() as session:
+        counts = {}
+        for table_name, model in (
+            ("decisions", Decision),
+            ("orders", Order),
+            ("positions", Position),
+            ("trade_journal", TradeJournal),
+            ("events", Event),
+        ):
+            result = await session.execute(select(func.count()).select_from(model))
+            counts[table_name] = result.scalar() or 0
+
+    return {
+        "settings": _serialize_settings(mask_secrets=True),
+        "db_status": {
+            "db_url": settings.db_url,
+            "counts": counts,
+        },
+    }
+
+
+@router.put("/settings")
+async def update_settings(payload: SettingsUpdate, credentials: Any = Depends(security)):
+    """Update settings and persist to .env and/or DB"""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user or user.role != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    restart_required = set()
+
+    def _set_if_provided(attr: str, value: Any, requires_restart: str | None = None):
+        if value is None:
+            return
+        setattr(settings, attr, value)
+        if requires_restart:
+            restart_required.add(requires_restart)
+
+    _set_if_provided("env", payload.env, "api+worker")
+    _set_if_provided("api_host", payload.api_host, "api")
+    _set_if_provided("api_port", payload.api_port, "api")
+    _set_if_provided("db_url", payload.db_url, "api+worker")
+    _set_if_provided("binance_testnet", payload.binance_testnet, "worker")
+
+    if payload.binance_api_key:
+        _set_if_provided("binance_api_key", payload.binance_api_key, "worker")
+    if payload.binance_api_secret:
+        _set_if_provided("binance_api_secret", payload.binance_api_secret, "worker")
+    if payload.telegram_bot_token:
+        _set_if_provided("telegram_bot_token", payload.telegram_bot_token, "telegram")
+    if payload.telegram_admin_ids is not None:
+        _set_if_provided("telegram_admin_ids", payload.telegram_admin_ids, "telegram")
+    if payload.telegram_trader_ids is not None:
+        _set_if_provided("telegram_trader_ids", payload.telegram_trader_ids, "telegram")
+
+    _set_if_provided("selected_llm", payload.selected_llm, "worker")
+    if payload.openai_api_key:
+        _set_if_provided("openai_api_key", payload.openai_api_key, "worker")
+    if payload.anthropic_api_key:
+        _set_if_provided("anthropic_api_key", payload.anthropic_api_key, "worker")
+    if payload.openai_model is not None:
+        _set_if_provided("openai_model", payload.openai_model, "worker")
+    if payload.anthropic_model is not None:
+        _set_if_provided("anthropic_model", payload.anthropic_model, "worker")
+    if payload.use_local_llm is not None:
+        _set_if_provided("use_local_llm", payload.use_local_llm, "worker")
+
+    persist = (payload.persist or "both").lower()
+
+    if persist in ("env", "both"):
+        env_updates = {
+            "ENV": settings.env,
+            "API_HOST": settings.api_host,
+            "API_PORT": str(settings.api_port),
+            "DB_URL": settings.db_url,
+            "BINANCE_TESTNET": str(settings.binance_testnet).lower(),
+            "BINANCE_API_KEY": settings.binance_api_key,
+            "BINANCE_API_SECRET": settings.binance_api_secret,
+            "TELEGRAM_BOT_TOKEN": settings.telegram_bot_token,
+            "TELEGRAM_ADMIN_IDS": settings.telegram_admin_ids,
+            "TELEGRAM_TRADER_IDS": settings.telegram_trader_ids,
+            "SELECTED_LLM": settings.selected_llm,
+            "OPENAI_API_KEY": settings.openai_api_key or "",
+            "OPENAI_MODEL": settings.openai_model,
+            "ANTHROPIC_API_KEY": settings.anthropic_api_key or "",
+            "CLAUDE_MODEL": settings.anthropic_model,
+            "USE_LOCAL_LLM": str(settings.use_local_llm).lower(),
+        }
+        for key, value in env_updates.items():
+            set_key(str(ENV_PATH), key, value if value is not None else "")
+
+    if persist in ("db", "both"):
+        async with AsyncSessionFactory() as session:
+            manager = ConfigVersionManager(session)
+            await manager.create_version(
+                config_type="system",
+                config=_serialize_settings(mask_secrets=False),
+                created_by=user.username,
+                description="System settings updated via UI",
+            )
+
+    return {
+        "status": "success",
+        "settings": _serialize_settings(mask_secrets=True),
+        "restart_required": sorted(restart_required),
+        "persisted": persist,
+    }
+
+
+@router.post("/settings/test/binance")
+async def test_binance_connectivity(credentials: Any = Depends(security)):
+    """Test Binance connectivity (testnet or live)"""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user or user.role not in ("admin", "trader"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    base = "https://testnet.binancefuture.com" if settings.binance_testnet else "https://fapi.binance.com"
+    url = f"{base}/fapi/v1/ping"
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url)
+        return {"ok": resp.status_code == 200, "status_code": resp.status_code, "base_url": base}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "base_url": base}
+
+
+@router.post("/settings/test/telegram")
+async def test_telegram_connectivity(credentials: Any = Depends(security)):
+    """Test Telegram bot token"""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user or user.role not in ("admin", "trader"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if not settings.telegram_bot_token:
+        return {"ok": False, "error": "Telegram bot token not set"}
+
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/getMe"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url)
+            data = resp.json()
+        return {"ok": data.get("ok", False), "result": data.get("result", None)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # ===== Control Actions =====
@@ -482,3 +904,234 @@ async def sync_now_action(credentials: Any = Depends(security)):
 
     # TODO: Call worker sync endpoint
     return {"detail": "Sync started"}
+
+
+@router.get("/actions/status")
+async def get_actions_status(credentials: Any = Depends(security)):
+    """Get worker status and approval mode"""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    async with AsyncSessionFactory() as session:
+        # Get active config for approval mode
+        result = await session.execute(
+            select(BotConfig).where(BotConfig.is_active == True).order_by(desc(BotConfig.version))
+        )
+        config = result.scalar_one_or_none()
+        
+        # We can also return the worker_state if we import it, but for now just approval mode
+        return {
+            "approval_mode": config.approval_mode if config else False,
+            "is_paused": False, # TODO: Connect to global state
+        }
+
+
+@router.post("/actions/approval-mode")
+async def toggle_approval_mode(enabled: bool, credentials: Any = Depends(security)):
+    """Toggle manual approval mode"""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user or user.role != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    async with AsyncSessionFactory() as session:
+        result = await session.execute(
+            select(BotConfig).where(BotConfig.is_active == True).order_by(desc(BotConfig.version))
+        )
+        config = result.scalar_one_or_none()
+        
+        if config:
+            config.approval_mode = enabled
+            await session.commit()
+            return {"status": "success", "approval_mode": enabled}
+        raise HTTPException(status_code=404, detail="Active config not found")
+
+
+@router.post("/actions/approve-decision/{trace_id}")
+async def approve_decision(trace_id: str, credentials: Any = Depends(security)):
+    """Manually approve a pending decision"""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    async with AsyncSessionFactory() as session:
+        result = await session.execute(select(Decision).where(Decision.trace_id == trace_id))
+        decision = result.scalar_one_or_none()
+        
+        if not decision:
+            raise HTTPException(status_code=404, detail="Decision not found")
+        
+        if decision.status != "AWAITING_APPROVAL":
+            return {"status": "error", "message": f"Decision is in {decision.status} status, cannot approve."}
+        
+        decision.status = "APPROVED_MANUALLY"
+        decision.approved_at = datetime.utcnow()
+        decision.approved_by = user.username
+        await session.commit()
+        
+        logger.info("decision_manually_approved", trace_id=trace_id, user=user.username)
+        return {"status": "success", "message": "Decision approved"}
+@router.post("/positions/{symbol}/close")
+async def close_position_manual(
+    symbol: str,
+    credentials: Any = Depends(security)
+):
+    """Manually close a position"""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user or user.role not in ("admin", "trader"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    from packages.shared.exchange.binance_futures import BinanceFuturesClient
+    from packages.shared.exchange.mock import MockExchange
+    from apps.worker.engine.execution import ExecutionEngine
+    from packages.shared.schemas import Decision
+    from packages.shared.enums import ActionType, MarketRegime, Side
+    
+    async with AsyncSessionFactory() as session:
+        # Determine exchange
+        if settings.binance_api_key and settings.binance_api_secret:
+            exchange = BinanceFuturesClient()
+        else:
+            exchange = MockExchange()
+            
+        execution_engine = ExecutionEngine(exchange)
+        trace_id = f"manual_close_{uuid.uuid4().hex[:8]}"
+        
+        # Create a mock decision for closing
+        decision = Decision(
+            symbol=symbol,
+            action=ActionType.CLOSE,
+            regime=MarketRegime.UNKNOWN, # Fallback
+            side=Side.LONG, # Side doesn't matter for close
+            confidence=1.0,
+            rationale=f"Manual close by {user.username}"
+        )
+        
+        try:
+            result = await execution_engine.execute_decision(decision, trace_id, session)
+            return result
+        except Exception as e:
+            logger.error("manual_close_failed", symbol=symbol, error=str(e))
+            raise HTTPException(status_code=500, detail=str(e))
+@router.post("/positions/open")
+async def open_position_manual(
+    payload: dict, # symbol, side, leverage, size_pct
+    credentials: Any = Depends(security)
+):
+    """Manually open a position"""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user or user.role not in ("admin", "trader"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    from packages.shared.exchange.binance_futures import BinanceFuturesClient
+    from packages.shared.exchange.mock import MockExchange
+    from apps.worker.engine.execution import ExecutionEngine
+    from packages.shared.schemas import Decision
+    from packages.shared.enums import ActionType, MarketRegime, Side
+    import uuid
+
+    symbol = payload.get("symbol")
+    side_str = payload.get("side", "LONG").upper()
+    leverage = int(payload.get("leverage", 1))
+    size_pct = float(payload.get("size_pct", 1.0))
+
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required")
+
+    async with AsyncSessionFactory() as session:
+        if settings.binance_api_key and settings.binance_api_secret:
+            exchange = BinanceFuturesClient()
+        else:
+            exchange = MockExchange()
+            
+        execution_engine = ExecutionEngine(exchange)
+        trace_id = f"manual_open_{uuid.uuid4().hex[:8]}"
+        
+        decision = Decision(
+            symbol=symbol,
+            action=ActionType.OPEN,
+            regime=MarketRegime.UNKNOWN,
+            side=Side.LONG if side_str == "LONG" else Side.SHORT,
+            confidence=1.0,
+            leverage=leverage,
+            size_pct=size_pct / 100.0, # Convert % to decimal
+            rationale=f"Manual trade by {user.username}"
+        )
+        
+        try:
+            # For manual orders, we might want to bypass risk engine or not. 
+            # Here we just execute it directly via the engine.
+            result = await execution_engine.execute_decision(decision, trace_id, session)
+            return result
+        except Exception as e:
+            logger.error("manual_open_failed", symbol=symbol, error=str(e))
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/wallet/balance")
+async def get_wallet_balance(credentials: Any = Depends(security)):
+    """Get wallet balance and recent PnL"""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    from packages.shared.exchange.binance_futures import BinanceFuturesClient
+    from packages.shared.exchange.mock import MockExchange
+    from datetime import datetime, timedelta
+
+    async with AsyncSessionFactory() as session:
+        # Determine exchange
+        if settings.binance_api_key and settings.binance_api_secret:
+            exchange = BinanceFuturesClient()
+        else:
+            exchange = MockExchange()
+            
+        try:
+            balance_data = await exchange.get_balance()
+            
+            # Fetch 24h Realized PnL
+            yesterday = datetime.utcnow() - timedelta(days=1)
+            pnl_result = await session.execute(
+                select(func.sum(TradeJournal.pnl))
+                .where(TradeJournal.closed_at >= yesterday)
+            )
+            realized_pnl_24h = float(pnl_result.scalar() or 0.0)
+
+            # Fetch current Unrealized PnL from all positions
+            from packages.shared.models import Position
+            pos_result = await session.execute(select(Position))
+            positions = pos_result.scalars().all()
+            unrealized_pnl = sum(float(p.unrealized_pnl or 0.0) for p in positions)
+
+            total_pnl_24h = realized_pnl_24h + unrealized_pnl
+            
+            # Fetch last 5 trades
+            trades_result = await session.execute(
+                select(TradeJournal)
+                .order_by(desc(TradeJournal.closed_at))
+                .limit(5)
+            )
+            recent_trades = trades_result.scalars().all()
+            
+            return {
+                "wallet_balance": balance_data["wallet_balance"],
+                "available_balance": balance_data["balance"],
+                "unrealized_pnl": unrealized_pnl,
+                "realized_pnl_24h": realized_pnl_24h,
+                "pnl_24h": total_pnl_24h,
+                "pnl_24h_pct": (total_pnl_24h / balance_data["wallet_balance"] * 100) if balance_data["wallet_balance"] > 0 else 0,
+                "recent_trades": [
+                    {
+                        "symbol": t.symbol,
+                        "side": t.side,
+                        "pnl": float(t.pnl),
+                        "closed_at": t.closed_at.isoformat(),
+                        "exit_reason": t.exit_reason
+                    }
+                    for t in recent_trades
+                ]
+            }
+        except Exception as e:
+            logger.error("get_wallet_balance_failed", error=str(e))
+            raise HTTPException(status_code=500, detail=str(e))
+

@@ -6,16 +6,100 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 import logging
 
-from packages.shared.trade_journal import TradeJournalEntry
+from packages.shared.trade_journal import TradeJournalEntry, ExitReason
 from packages.shared.learning_agent import LearningAgent, SuggestedAdaptations
+from packages.shared.database import AsyncSessionFactory
+from packages.shared.models import TradeJournal as TradeJournalModel
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["phase6-learning"])
 
 
-# Global learning agent instance (in production: use database)
+# Global learning agent instance (legacy fallback)
 learning_agent = LearningAgent()
+
+
+def _parse_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return None
+
+
+def _model_to_entry(trade: TradeJournalModel) -> TradeJournalEntry:
+    features = trade.features_json or {}
+    decision_json = trade.decision_json or {}
+    entry_time = _parse_datetime(features.get("entry_time"))
+    exit_time = _parse_datetime(features.get("exit_time"))
+
+    if not exit_time:
+        exit_time = trade.closed_at or datetime.utcnow()
+    if not entry_time:
+        holding_sec = trade.holding_time or 0
+        entry_time = exit_time - timedelta(seconds=holding_sec)
+
+    exit_reason = features.get("exit_reason") or trade.exit_reason or ExitReason.MANUAL.value
+    try:
+        exit_reason = ExitReason(exit_reason)
+    except Exception:
+        exit_reason = ExitReason.MANUAL
+
+    pnl_pct = features.get("pnl_pct")
+    if pnl_pct is None:
+        denom = abs(trade.entry_price * (features.get("entry_quantity") or 1.0))
+        pnl_pct = (trade.pnl / denom) if denom > 0 else 0.0
+
+    return TradeJournalEntry(
+        trace_id=trade.trace_id,
+        trade_id=f"trade_{trade.id}",
+        symbol=trade.symbol,
+        side=trade.side,
+        entry_time=entry_time,
+        exit_time=exit_time,
+        entry_price=float(trade.entry_price),
+        entry_quantity=float(features.get("entry_quantity", 0.0)),
+        entry_leverage=float(features.get("entry_leverage", 1.0)),
+        exit_price=float(trade.exit_price),
+        exit_reason=exit_reason,
+        pnl=float(trade.pnl),
+        pnl_pct=float(pnl_pct),
+        commission=float(features.get("commission", 0.0)),
+        risk_reward_ratio=float(trade.rr or 1.0),
+        holding_time_minutes=int((trade.holding_time or 0) / 60),
+        max_drawdown=float(features.get("max_drawdown", 0.0)),
+        max_runup=float(features.get("max_runup", 0.0)),
+        market_regime=trade.regime or str(decision_json.get("regime", "unknown")),
+        volatility_percentile=int(features.get("volatility_percentile", 50)),
+        bid_ask_spread_pips=float(features.get("bid_ask_spread_pips", 0.0)),
+        funding_rate=float(features.get("funding_rate", 0.0)),
+        position_pct=float(features.get("position_pct", 0.0)),
+        stop_loss_pips=float(features.get("stop_loss_pips", 0.0)),
+        take_profit_pips=float(features.get("take_profit_pips", 0.0)),
+        decision_json=decision_json,
+        confidence=float(features.get("confidence", decision_json.get("confidence", 0.0))),
+        ai_model=str(features.get("ai_model", "mock")),
+        prompt_pack_version=int(features.get("prompt_pack_version", 1)),
+        is_winner=trade.pnl > 0,
+        is_breakeven=abs(trade.pnl) < 1e-8,
+        notes=None,
+    )
+
+
+async def _get_learning_agent_from_db() -> LearningAgent:
+    agent = LearningAgent()
+    async with AsyncSessionFactory() as session:
+        from sqlalchemy import select
+        result = await session.execute(
+            select(TradeJournalModel).order_by(TradeJournalModel.closed_at.desc())
+        )
+        trades = result.scalars().all()
+        for trade in trades:
+            agent.add_trade(_model_to_entry(trade))
+    return agent
 
 
 # ============================================================================
@@ -37,17 +121,48 @@ async def record_trade(
         Confirmation with trade_id
     """
     try:
-        # Store to database
-        # db.add(TradeJournal(**trade.dict()))
-        # db.commit()
-
-        # Add to learning agent
-        learning_agent.add_trade(trade)
+        async with AsyncSessionFactory() as session:
+            record = TradeJournalModel(
+                trace_id=trade.trace_id,
+                symbol=trade.symbol,
+                side=trade.side,
+                entry_price=trade.entry_price,
+                exit_price=trade.exit_price,
+                pnl=trade.pnl,
+                rr=trade.risk_reward_ratio,
+                holding_time=int(trade.holding_time_minutes * 60),
+                regime=trade.market_regime,
+                features_json={
+                    "entry_time": trade.entry_time.isoformat(),
+                    "exit_time": trade.exit_time.isoformat(),
+                    "entry_quantity": trade.entry_quantity,
+                    "entry_leverage": trade.entry_leverage,
+                    "volatility_percentile": trade.volatility_percentile,
+                    "bid_ask_spread_pips": trade.bid_ask_spread_pips,
+                    "funding_rate": trade.funding_rate,
+                    "position_pct": trade.position_pct,
+                    "stop_loss_pips": trade.stop_loss_pips,
+                    "take_profit_pips": trade.take_profit_pips,
+                    "confidence": trade.confidence,
+                    "ai_model": trade.ai_model,
+                    "prompt_pack_version": trade.prompt_pack_version,
+                    "pnl_pct": trade.pnl_pct,
+                    "max_drawdown": trade.max_drawdown,
+                    "max_runup": trade.max_runup,
+                    "exit_reason": trade.exit_reason.value,
+                },
+                decision_json=trade.decision_json,
+                exit_reason=trade.exit_reason.value,
+                closed_at=trade.exit_time,
+            )
+            session.add(record)
+            await session.commit()
 
         logger.info(f"✅ Trade recorded: {trade.trade_id} {trade.symbol} {trade.side} {trade.pnl_pct:+.2%}")
 
         # Check if we should trigger learning analysis
-        if len(learning_agent.trades) % 50 == 0:
+        agent = await _get_learning_agent_from_db()
+        if len(agent.trades) % 50 == 0:
             background_tasks.add_task(_trigger_learning_analysis)
 
         return {
@@ -82,60 +197,66 @@ async def list_trades(
     Returns:
         List of trade journal entries
     """
-    # Would query database in production
-    trades = learning_agent.trades
+    async with AsyncSessionFactory() as session:
+        from sqlalchemy import select
+        query = select(TradeJournalModel)
+        if symbol:
+            query = query.where(TradeJournalModel.symbol == symbol)
+        result = await session.execute(query.order_by(TradeJournalModel.closed_at.desc()))
+        trades = result.scalars().all()
 
-    if symbol:
-        trades = [t for t in trades if t.symbol == symbol]
+    entries = [_model_to_entry(trade) for trade in trades]
 
     if status == "winner":
-        trades = [t for t in trades if t.is_winner]
+        entries = [t for t in entries if t.is_winner]
     elif status == "loser":
-        trades = [t for t in trades if not t.is_winner and not t.is_breakeven]
+        entries = [t for t in entries if not t.is_winner and not t.is_breakeven]
 
-    # Sort by entry time descending
-    trades = sorted(trades, key=lambda t: t.entry_time, reverse=True)
-
-    total = len(trades)
-    paginated = trades[offset:offset+limit]
+    total = len(entries)
+    paginated = entries[offset:offset + limit]
 
     return {
         "trades": [t.dict() for t in paginated],
         "total": total,
         "limit": limit,
-        "offset": offset
+        "offset": offset,
     }
 
 
 @router.get("/trade-journal/{trade_id}")
 async def get_trade_details(trade_id: str) -> Dict[str, Any]:
     """Get specific trade details"""
-    trade = next((t for t in learning_agent.trades if t.trade_id == trade_id), None)
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
+    async with AsyncSessionFactory() as session:
+        from sqlalchemy import select
+        result = await session.execute(
+            select(TradeJournalModel).where(TradeJournalModel.id == trade_id.replace("trade_", ""))
+        )
+        trade = result.scalar_one_or_none()
+        if not trade:
+            raise HTTPException(status_code=404, detail="Trade not found")
 
-    return {
-        "trade": trade.dict()
-    }
+    trade = _model_to_entry(trade)
+    return {"trade": trade.dict()}
 
 
 @router.get("/trade-journal/stats/summary")
 async def get_trade_stats_summary() -> Dict[str, Any]:
     """Get quick summary stats from trades"""
-    if not learning_agent.trades:
+    agent = await _get_learning_agent_from_db()
+    if not agent.trades:
         return {"message": "No trades yet"}
 
-    winners = sum(1 for t in learning_agent.trades if t.is_winner)
-    losers = sum(1 for t in learning_agent.trades if not t.is_winner and not t.is_breakeven)
-    total_pnl = sum(t.pnl for t in learning_agent.trades)
+    winners = sum(1 for t in agent.trades if t.is_winner)
+    losers = sum(1 for t in agent.trades if not t.is_winner and not t.is_breakeven)
+    total_pnl = sum(t.pnl for t in agent.trades)
 
     return {
-        "total_trades": len(learning_agent.trades),
+        "total_trades": len(agent.trades),
         "winners": winners,
         "losers": losers,
-        "win_rate": winners / len(learning_agent.trades),
+        "win_rate": winners / len(agent.trades),
         "total_pnl": total_pnl,
-        "avg_trade": total_pnl / len(learning_agent.trades)
+        "avg_trade": total_pnl / len(agent.trades),
     }
 
 
@@ -154,9 +275,10 @@ async def trigger_learning_analysis(
         Learning report
     """
     try:
-        logger.info(f"Starting manual learning analysis on {len(learning_agent.trades)} trades")
+        agent = await _get_learning_agent_from_db()
+        logger.info(f"Starting manual learning analysis on {len(agent.trades)} trades")
 
-        report = learning_agent.analyze()
+        report = agent.analyze()
 
         # Store to database
         # db.add(LearningReport(
@@ -218,10 +340,11 @@ async def get_losing_patterns() -> Dict[str, Any]:
         List of destructive patterns found
     """
     try:
-        if not learning_agent.trades:
+        agent = await _get_learning_agent_from_db()
+        if not agent.trades:
             return {"patterns": []}
 
-        report = learning_agent.analyze()
+        report = agent.analyze()
 
         return {
             "patterns": [p.dict() for p in report.losing_patterns],
@@ -242,10 +365,11 @@ async def get_confidence_calibration() -> Dict[str, Any]:
     Shows how well AI confidence predicts win/loss
     """
     try:
-        if not learning_agent.trades:
+        agent = await _get_learning_agent_from_db()
+        if not agent.trades:
             return {"calibration": []}
 
-        report = learning_agent.analyze()
+        report = agent.analyze()
 
         return {
             "calibration": [c.dict() for c in report.confidence_calibration],
@@ -427,14 +551,15 @@ async def get_dashboard_learning_metrics() -> Dict[str, Any]:
         Current stats, patterns, recommendations
     """
     try:
-        if not learning_agent.trades or len(learning_agent.trades) < 5:
+        agent = await _get_learning_agent_from_db()
+        if not agent.trades or len(agent.trades) < 5:
             return {
                 "status": "insufficient_data",
-                "trades_recorded": len(learning_agent.trades),
+                "trades_recorded": len(agent.trades),
                 "needed_for_analysis": 5
             }
 
-        report = learning_agent.analyze()
+        report = agent.analyze()
 
         return {
             "status": "success",

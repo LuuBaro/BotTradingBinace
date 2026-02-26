@@ -4,11 +4,9 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
 } from 'recharts';
 import { AlertTriangle, TrendingUp, TrendingDown, Zap, RefreshCw } from 'lucide-react';
-import { apiClient as _apiClient } from '../api/apiClient';
-import type { LearningReport as _LearningReport } from '../api/types';
+import { createApiClient, getApiBaseUrl } from '../api/client';
 
-// Mock apiClient for now
-const apiClient = { get: () => Promise.resolve({ data: {} }), post: () => Promise.resolve({ data: {} }) } as any;
+const apiClient = createApiClient(getApiBaseUrl(), localStorage.getItem('token') || '');
 
 interface PatternData {
   name: string;

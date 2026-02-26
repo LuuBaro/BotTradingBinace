@@ -1,24 +1,36 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useMemo } from 'react'
 import { useConfigStore } from '../store'
-import { createApiClient } from '../api/client'
+import { createApiClient, getApiBaseUrl } from '../api/client'
+import { Save, RotateCcw, History, AlertTriangle, CheckCircle2, Cpu, Lock, Terminal, ShieldCheck, ChevronRight } from 'lucide-react'
+import { format } from 'date-fns'
 
 export const RiskConfigPage: React.FC = () => {
   const { currentConfig, setConfig, versions, setVersions } = useConfigStore()
   const [editedConfig, setEditedConfig] = useState<any>(null)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
-  const api = createApiClient('http://localhost:8001/api', localStorage.getItem('token') || '')
+  const [loading, setLoading] = useState(true)
+
+  // Memoized API client
+  const token = localStorage.getItem('token') || ''
+  const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token])
 
   useEffect(() => {
     const fetchConfig = async () => {
       try {
+        setLoading(true)
         const config = await api.getRiskConfig()
         const vers = await api.getRiskConfigVersions()
+        console.log('📋 Loaded risk config:', config)
+        console.log('📊 Loaded versions:', vers)
         setConfig(config)
         setVersions(vers)
-        setEditedConfig(config)
+        setEditedConfig({ ...config })
       } catch (error) {
         console.error('Failed to fetch config:', error)
+        setMessage({ type: 'error', text: 'Failed to synchronize with Global Risk Cluster' })
+      } finally {
+        setLoading(false)
       }
     }
 
@@ -30,10 +42,10 @@ export const RiskConfigPage: React.FC = () => {
     try {
       const updated = await api.updateRiskConfig(editedConfig)
       setConfig(updated)
-      setMessage({ type: 'success', text: 'Config updated successfully' })
-      setTimeout(() => setMessage(null), 3000)
+      setMessage({ type: 'success', text: 'Risk parameters successfully updated and deployed.' })
+      setTimeout(() => setMessage(null), 4000)
     } catch (error: any) {
-      setMessage({ type: 'error', text: error.message })
+      setMessage({ type: 'error', text: error.message || 'Verification failed during deployment' })
     } finally {
       setSaving(false)
     }
@@ -44,110 +56,230 @@ export const RiskConfigPage: React.FC = () => {
       const config = await api.rollbackRiskConfig(versionId)
       setConfig(config)
       setEditedConfig(config)
-      setMessage({ type: 'success', text: 'Rolled back successfully' })
-      setTimeout(() => setMessage(null), 3000)
+      setMessage({ type: 'success', text: 'Rollback sequence completed.' })
+      setTimeout(() => setMessage(null), 4000)
     } catch (error: any) {
-      setMessage({ type: 'error', text: error.message })
+      setMessage({ type: 'error', text: error.message || 'Rollback failed' })
     }
   }
 
-  if (!editedConfig) {
-    return <div className="text-white">Loading...</div>
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-40 gap-6 opacity-50 bg-mesh min-h-screen">
+        <div className="spinner w-12 h-12"></div>
+        <p className="text-[10px] font-black uppercase tracking-[0.3em] text-blue-400 animate-pulse">Decrypting Risk Vault</p>
+      </div>
+    )
   }
 
   return (
-    <div className="space-y-6">
-      <h1 className="text-3xl font-bold">Risk Configuration</h1>
+    <div className="space-y-10 animate-fadeIn bg-mesh min-h-full pb-20 px-4 pt-4">
+      {/* Header Section */}
+      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6">
+        <div className="space-y-2">
+          <div className="flex items-center gap-3 mb-2">
+            <div className="p-2 bg-blue-500/10 rounded-lg border border-blue-500/20">
+              <ShieldCheck className="text-blue-400" size={24} />
+            </div>
+            <span className="text-[10px] font-black text-blue-400 uppercase tracking-[0.3em]">Guardian Protocol</span>
+          </div>
+          <h1 className="text-5xl font-black text-gradient">Risk Vault</h1>
+          <p className="text-slate-400 max-w-xl font-medium">Fine-tune the neural guardrails and execution limits for autonomous trading cycles.</p>
+        </div>
+
+        <div className="flex items-center gap-4">
+          <div className="px-5 py-3 glass-dark border-white/5 rounded-2xl flex items-center gap-3">
+            <div className="w-8 h-8 bg-amber-500/10 rounded-lg flex items-center justify-center border border-amber-500/20">
+              <Lock className="text-amber-400" size={16} />
+            </div>
+            <div>
+              <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest block">Access Level</span>
+              <span className="text-xs font-black text-white uppercase font-mono">ENCRYPTED_AUTH_LVL_0</span>
+            </div>
+          </div>
+        </div>
+      </div>
 
       {message && (
-        <div className={`alert ${
-          message.type === 'success'
-            ? 'alert-success'
-            : 'alert-danger'
-        }`}>
-          {message.text}
+        <div className={`p-5 rounded-2xl border-l-[6px] animate-slideInRight shadow-2xl flex items-center gap-4 ${message.type === 'success'
+          ? 'glass-dark border-emerald-500/50 bg-emerald-500/5 text-emerald-100 shadow-emerald-500/10'
+          : 'glass-dark border-rose-500/50 bg-rose-500/5 text-rose-100 shadow-rose-500/10'
+          }`}>
+          {message.type === 'success' ? <CheckCircle2 size={20} className="text-emerald-400" /> : <AlertTriangle size={20} className="text-rose-400" />}
+          <p className="text-sm font-bold tracking-tight">{message.text}</p>
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Config Editor */}
-        <div className="lg:col-span-2 card">
-          <div className="card-header">
-            <h2 className="text-xl font-bold">Current Configuration</h2>
-          </div>
-          <div className="card-body">
-            <div className="space-y-4">
-              {Object.entries(editedConfig).map(([key, value]: [string, any]) => (
-                <div key={key}>
-                  <label className="block text-sm font-medium text-slate-300 mb-2 capitalize">
-                    {key.replace(/_/g, ' ')}
-                  </label>
-                  <input
-                    type={typeof value === 'number' ? 'number' : 'text'}
-                    value={value}
-                    onChange={(e) =>
-                      setEditedConfig({
-                        ...editedConfig,
-                        [key]: typeof value === 'number' ? parseFloat(e.target.value) : e.target.value,
-                      })
-                    }
-                    className="input w-full"
-                  />
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-10 items-stretch">
+        {/* Config Editor - Neural Parameters */}
+        <div className="xl:col-span-8 flex flex-col gap-6">
+          <div className="card glass-dark border-white/5 shadow-3xl overflow-hidden relative flex flex-col h-full">
+            <div className="p-8 border-b border-white/5 bg-white/[0.01]">
+              <div className="flex justify-between items-center">
+                <div className="flex items-center gap-3">
+                  <Cpu className="text-blue-400" size={20} />
+                  <h2 className="text-xl font-black text-white uppercase tracking-tight">Active Parameters</h2>
                 </div>
-              ))}
+                <span className="text-[10px] font-mono text-slate-600 uppercase tracking-widest">NODE_ID: DC-88-ALPHA</span>
+              </div>
             </div>
 
-            <div className="flex gap-2 mt-6">
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                className="btn btn-primary flex-1 disabled:opacity-50"
-              >
-                {saving ? 'Saving...' : 'Save Configuration'}
-              </button>
-              <button
-                onClick={() => setEditedConfig(currentConfig)}
-                className="btn btn-secondary flex-1"
-              >
-                Reset
-              </button>
+            <div className="p-10 flex-grow">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-10">
+                {editedConfig && Object.entries(editedConfig).length > 0 ? (
+                  Object.entries(editedConfig).map(([key, value]: [string, any]) => {
+                    const isObject = typeof value === 'object' && value !== null;
+                    const displayValue = isObject ? JSON.stringify(value) : value;
+
+                    const displayKey = key
+                      .replace(/([A-Z])/g, ' $1')
+                      .replace(/_/g, ' ')
+                      .trim()
+                      .split(' ')
+                      .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+                      .join(' ')
+
+                    return (
+                      <div key={key} className="space-y-3 group">
+                        <div className="flex justify-between items-center px-1">
+                          <label className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] group-focus-within:text-blue-400 transition-colors">
+                            {displayKey}
+                          </label>
+                          <span className="text-[9px] font-mono text-slate-700 opacity-0 group-hover:opacity-100 transition-opacity uppercase">{typeof value}</span>
+                        </div>
+                        <div className="relative">
+                          <input
+                            type={typeof value === 'number' ? 'number' : 'text'}
+                            value={displayValue}
+                            onChange={(e) => {
+                              let newVal: any = e.target.value;
+                              if (typeof value === 'number') {
+                                newVal = parseFloat(e.target.value) || 0;
+                              } else if (isObject) {
+                                try {
+                                  newVal = JSON.parse(e.target.value);
+                                } catch (err) {
+                                  // Keep as string if invalid JSON during typing
+                                }
+                              }
+                              setEditedConfig({
+                                ...editedConfig,
+                                [key]: newVal,
+                              })
+                            }}
+                            className="w-full bg-slate-950/50 border border-white/5 py-3 px-5 rounded-2xl text-white font-bold font-mono focus:border-blue-500/50 focus:ring-4 focus:ring-blue-500/10 outline-none transition-all group-hover:bg-slate-900/50 text-sm"
+                            step={typeof value === 'number' && Math.abs(value) < 1 ? '0.01' : '1'}
+                          />
+                          {typeof value === 'number' && (
+                            <div className="absolute right-4 top-1/2 -translate-y-1/2 opacity-20 pointer-events-none text-[10px] font-black">NUM</div>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })
+                ) : (
+                  <div className="col-span-2 py-20 text-center opacity-30 select-none">
+                    <Terminal size={40} className="mx-auto mb-4" />
+                    <p className="text-xs font-black uppercase tracking-[0.3em]">No valid parameters detected</p>
+                  </div>
+                )}
+              </div>
             </div>
+
+            <div className="p-10 pt-0">
+              <div className="flex gap-4 pt-10 border-t border-white/5">
+                <button
+                  onClick={handleSave}
+                  disabled={saving}
+                  className="btn btn-primary flex-[2] py-4 rounded-2xl shadow-xl shadow-blue-500/20 active:scale-[0.98] disabled:opacity-50 group overflow-hidden min-h-[56px] relative"
+                >
+                  <div className="relative z-10 flex items-center justify-center gap-3">
+                    {saving ? <div className="spinner w-4 h-4 border-2"></div> : <Save size={18} className="group-hover:scale-110 transition-transform" />}
+                    <span className="font-black uppercase tracking-widest text-xs">{saving ? 'Broadcasting...' : 'Apply Deployment Changes'}</span>
+                  </div>
+                  <div className="absolute inset-0 bg-gradient-to-r from-blue-600 to-purple-600 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"></div>
+                </button>
+                <button
+                  onClick={() => setEditedConfig({ ...currentConfig })}
+                  className="flex-1 py-4 glass-dark border-white/10 rounded-2xl text-slate-400 hover:text-white transition-all flex items-center justify-center gap-3 font-bold text-xs uppercase tracking-widest active:scale-95 min-h-[56px]"
+                >
+                  <RotateCcw size={18} />
+                  Reset
+                </button>
+              </div>
+            </div>
+
+            {/* Subtle background glow */}
+            <div className="absolute bottom-0 right-0 w-[50%] h-[50%] bg-blue-500/[0.01] blur-[120px] pointer-events-none"></div>
+          </div>
+
+          <div className="p-6 glass-dark border border-white/5 rounded-3xl flex items-center gap-4 text-slate-500">
+            <AlertTriangle size={20} className="text-amber-500 shrink-0" />
+            <p className="text-[10px] font-bold uppercase tracking-wide leading-relaxed">
+              <span className="text-amber-400">Security Warning:</span> Modifying risk parameters directly affects the neural execution engine's ability to minimize capital loss. Drastic changes should only be made following systemic review of backtest traces.
+            </p>
           </div>
         </div>
 
-        {/* Version History */}
-        <div className="card">
-          <div className="card-header">
-            <h2 className="text-xl font-bold">Version History</h2>
-          </div>
-          <div className="card-body max-h-96 overflow-auto">
-            <div className="space-y-2">
-              {versions.length === 0 ? (
-                <p className="text-slate-400 text-sm">No versions yet</p>
-              ) : (
-                versions.map((version) => (
-                  <div
-                    key={version.id}
-                    className="p-3 bg-slate-700/50 rounded-lg text-sm space-y-2"
-                  >
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <p className="text-white font-mono text-xs">{version.id.substring(0, 8)}</p>
-                        <p className="text-slate-400 text-xs">{new Date(version.created_at).toLocaleDateString()}</p>
-                      </div>
-                      <button
-                        onClick={() => handleRollback(version.id)}
-                        className="text-yellow-400 hover:text-yellow-300 text-xs font-medium"
-                      >
-                        Rollback
-                      </button>
-                    </div>
-                    <p className="text-slate-300 text-xs">{version.description}</p>
-                    <p className="text-slate-500 text-xs">by {version.created_by}</p>
-                  </div>
-                ))
-              )}
+        {/* Version History - Registry Timeline */}
+        <div className="xl:col-span-4 flex flex-col gap-6">
+          <div className="card glass-dark border-white/5 shadow-2xl h-full relative overflow-hidden flex flex-col">
+            <div className="p-8 border-b border-white/5 flex items-center justify-between bg-white/[0.01]">
+              <div className="flex items-center gap-3">
+                <History className="text-blue-400" size={20} />
+                <h2 className="text-xl font-black text-white uppercase tracking-tight text-gradient">Audit History</h2>
+              </div>
+              <div className="p-2 bg-white/5 rounded-lg border border-white/5">
+                <Terminal size={12} className="text-slate-500" />
+              </div>
             </div>
+            <div className="p-4 flex-grow overflow-y-auto custom-scrollbar">
+              <div className="space-y-4">
+                {versions.length === 0 ? (
+                  <div className="py-20 flex flex-col items-center gap-4 opacity-20">
+                    <Lock size={40} />
+                    <p className="text-xs font-black uppercase tracking-[0.2em] text-center">No previous states found in registry</p>
+                  </div>
+                ) : (
+                  versions.map((version) => (
+                    <div
+                      key={version.id}
+                      className="p-5 bg-white/[0.02] border border-white/5 rounded-2xl hover:bg-white/[0.04] transition-all group relative animate-slideUp"
+                    >
+                      <div className="flex justify-between items-start mb-4">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 group-hover:animate-ping"></span>
+                            <span className="text-[10px] font-black font-mono text-blue-400 uppercase tracking-tighter">REGISTRY_ID: {version.id.substring(0, 12)}</span>
+                          </div>
+                          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{format(new Date(version.created_at), 'MMM dd, yyyy · HH:mm:ss')}</p>
+                        </div>
+                        <button
+                          onClick={() => handleRollback(version.id)}
+                          className="bg-amber-500/10 border border-amber-500/20 text-amber-500 px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-amber-500 hover:text-black transition-all active:scale-95"
+                        >
+                          Restore State
+                        </button>
+                      </div>
+
+                      <div className="bg-slate-950/40 p-3 rounded-xl border border-white/5 italic">
+                        <p className="text-[11px] text-slate-400 leading-relaxed font-medium line-clamp-2 italic">"{version.description || 'System-generated snapshot following parameter recalibration.'}"</p>
+                      </div>
+
+                      <div className="mt-4 flex items-center justify-between text-[8px] font-black uppercase tracking-[0.2em] text-slate-600">
+                        <span>Author: {version.created_by.toUpperCase() || 'SYSTEM_CORE'}</span>
+                        <div className="flex items-center gap-1 group-hover:text-blue-400 transition-colors">
+                          <span>Inspect JSON</span>
+                          <ChevronRight size={10} />
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+            {/* Background Glow */}
+            <div className="absolute top-0 right-0 w-32 h-32 bg-purple-500/5 blur-3xl opacity-50"></div>
           </div>
         </div>
       </div>

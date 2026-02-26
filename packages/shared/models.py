@@ -35,6 +35,7 @@ class BotConfig(Base):
     active_prompt_pack_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    approval_mode: Mapped[bool] = mapped_column(Boolean, default=False)  # If True, requires manual approval for trades
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (Index("ix_bot_config_is_active", "is_active"),)
@@ -104,6 +105,27 @@ class Decision(Base):
     # Validation
     is_valid_json: Mapped[bool] = mapped_column(Boolean, default=False)
     validation_errors: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    
+    # Approval tracking
+    approved_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class Signal(Base):
+    """AI potential trading signals (Watchlist)"""
+
+    __tablename__ = "signals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    entry_zone: Mapped[str] = mapped_column(String(50), nullable=False)  # "65000-65200"
+    probability: Mapped[float] = mapped_column(Float, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE")  # ACTIVE, TRIGGERED, EXPIRED, CANCELLED
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
 
 
 class RiskLog(Base):
@@ -167,6 +189,8 @@ class Position(Base):
     # Stop-loss and Take-profit order IDs
     sl_order_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     tp_order_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    stop_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
+    take_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
     
     # Binance-specific fields (Phase 2+)
     leverage: Mapped[int] = mapped_column(Integer, default=1)

@@ -72,28 +72,27 @@ class RiskEngine:
                 return RiskValidationResult(
                     approved=False,
                     result=RiskResult.REJECTED,
-                    reason="Rejected: Mandatory SL/TP missing",
+                    reason="TỪ CHỐI: Thiếu điểm Cắt lỗ (SL) hoặc Chốt lời (TP) bắt buộc",
                 )
-            checks.append("SL/TP present")
+            checks.append("SL/TP hiện diện")
 
         # Check 2: Max leverage
         if decision.leverage > self.config.max_leverage:
             return RiskValidationResult(
                 approved=False,
                 result=RiskResult.REJECTED,
-                reason=f"Rejected: Leverage {decision.leverage}x exceeds max {self.config.max_leverage}x",
+                reason=f"TỪ CHỐI: Đòn bẩy {decision.leverage}x vượt mức tối đa {self.config.max_leverage}x",
             )
-        checks.append(f"Leverage {decision.leverage}x OK")
+        checks.append(f"Đòn bẩy {decision.leverage}x OK")
 
         # Check 3: Max position size
-        position_value = balance * decision.size_pct * decision.leverage
         if decision.size_pct > self.config.max_position_pct:
             return RiskValidationResult(
                 approved=False,
                 result=RiskResult.REJECTED,
-                reason=f"Rejected: Position size {decision.size_pct:.1%} exceeds max {self.config.max_position_pct:.1%}",
+                reason=f"TỪ CHỐI: Kích thước vị thế {decision.size_pct:.1%} vượt mức tối đa {self.config.max_position_pct:.1%}",
             )
-        checks.append(f"Position size {decision.size_pct:.1%} OK")
+        checks.append(f"Kích thước {decision.size_pct:.1%} OK")
 
         # Check 4: Risk per trade
         if decision.stop_loss:
@@ -101,24 +100,24 @@ class RiskEngine:
             risk_per_unit = abs(entry_price - decision.stop_loss)
             quantity = (balance * decision.size_pct * decision.leverage) / entry_price
             total_risk = risk_per_unit * quantity
-            risk_pct = total_risk / balance
+            risk_pct = total_risk / balance if balance > 0 else 1.0
 
             if risk_pct > self.config.max_risk_per_trade_pct:
                 return RiskValidationResult(
                     approved=False,
                     result=RiskResult.REJECTED,
-                    reason=f"Rejected: Risk {risk_pct:.2%} exceeds max {self.config.max_risk_per_trade_pct:.2%}",
+                    reason=f"TỪ CHỐI: Rủi ro {risk_pct:.2%} vượt mức tối đa cho phép {self.config.max_risk_per_trade_pct:.2%}",
                 )
-            checks.append(f"Risk {risk_pct:.2%} OK")
+            checks.append(f"Rủi ro {risk_pct:.2%} OK")
 
         # Check 5: Max concurrent positions
         if len(current_positions) >= self.config.max_concurrent_positions:
             return RiskValidationResult(
                 approved=False,
                 result=RiskResult.REJECTED,
-                reason=f"Rejected: Max {self.config.max_concurrent_positions} concurrent positions reached",
+                reason=f"TỪ CHỐI: Đã đạt giới hạn {self.config.max_concurrent_positions} vị thế cùng lúc",
             )
-        checks.append(f"Positions {len(current_positions)}/{self.config.max_concurrent_positions}")
+        checks.append(f"Số vị thế {len(current_positions)}/{self.config.max_concurrent_positions}")
 
         # Check 6: Orders per hour
         self._clean_old_orders()
@@ -126,9 +125,9 @@ class RiskEngine:
             return RiskValidationResult(
                 approved=False,
                 result=RiskResult.REJECTED,
-                reason=f"Rejected: Max {self.config.max_orders_per_hour} orders/hour reached",
+                reason=f"TỪ CHỐI: Vượt quá giới hạn {self.config.max_orders_per_hour} lệnh/giờ",
             )
-        checks.append(f"Orders {len(self.recent_orders)}/{self.config.max_orders_per_hour} per hour")
+        checks.append(f"Số lệnh trong giờ OK")
 
         # Check 7: Cooldown after loss
         if self.last_loss_time:
@@ -138,9 +137,9 @@ class RiskEngine:
                 return RiskValidationResult(
                     approved=False,
                     result=RiskResult.REJECTED,
-                    reason=f"Rejected: Cooldown active ({remaining}s remaining)",
+                    reason=f"TỪ CHỐI: Đang trong thời gian chờ sau lỗ ({remaining} giây còn lại)",
                 )
-        checks.append("No cooldown")
+        checks.append("Không có cooldown")
 
         # All checks passed
         self.recent_orders.append(datetime.utcnow())
@@ -154,7 +153,7 @@ class RiskEngine:
         return RiskValidationResult(
             approved=True,
             result=RiskResult.APPROVED,
-            reason=f"Approved - All checks passed: {', '.join(checks)}",
+            reason=f"ĐÃ DUYỆT - Tất cả kiểm tra an toàn đều đạt: {', '.join(checks)}",
         )
 
     def _clean_old_orders(self) -> None:

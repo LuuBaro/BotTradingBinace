@@ -42,7 +42,9 @@ class BinanceFuturesClient:
 
     async def __aenter__(self):
         """Async context manager entry"""
-        self.session = aiohttp.ClientSession()
+        # Force ThreadedResolver to avoid DNS issues with aiodns on Windows
+        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+        self.session = aiohttp.ClientSession(connector=connector)
         await self.sync_server_time()
         return self
 
@@ -125,16 +127,25 @@ class BinanceFuturesClient:
         try:
             if method == "GET":
                 async with self.session.get(url, params=params, headers=headers) as response:
+                    if response.status >= 400:
+                        body = await response.text()
+                        logger.error("binance_error_response", status=response.status, body=body, endpoint=endpoint)
                     response.raise_for_status()
                     return await response.json()
             
             elif method == "POST":
                 async with self.session.post(url, params=params, headers=headers) as response:
+                    if response.status >= 400:
+                        body = await response.text()
+                        logger.error("binance_error_response", status=response.status, body=body, endpoint=endpoint)
                     response.raise_for_status()
                     return await response.json()
             
             elif method == "DELETE":
                 async with self.session.delete(url, params=params, headers=headers) as response:
+                    if response.status >= 400:
+                        body = await response.text()
+                        logger.error("binance_error_response", status=response.status, body=body, endpoint=endpoint)
                     response.raise_for_status()
                     return await response.json()
             
@@ -142,12 +153,22 @@ class BinanceFuturesClient:
                 raise ValueError(f"Unsupported HTTP method: {method}")
         
         except aiohttp.ClientResponseError as e:
+            # Handle 400 Bad Request with more detail if possible
+            if e.status == 400:
+                try:
+                    # In higher versions of aiohttp, we might not have access to the body here
+                    # unless we read it before raise_for_status. 
+                    # Let's try to capture it.
+                    pass
+                except:
+                    pass
             logger.error(
                 "binance_api_error",
                 method=method,
                 endpoint=endpoint,
                 status=e.status,
                 message=e.message,
+                url=str(e.request_info.url) if e.request_info else None
             )
             raise
         except Exception as e:
@@ -165,6 +186,22 @@ class BinanceFuturesClient:
         """Get futures account balance"""
         result = await self._request("GET", "/fapi/v2/balance", signed=True)
         return result
+
+    async def get_balance(self) -> Dict[str, Any]:
+        """Get balance in uniform format compatible with MockExchange"""
+        try:
+            account_info = await self.get_account_info()
+            # Extract wallet balance from account info
+            total_wallet_balance = account_info.get("totalWalletBalance", 0)
+            available_balance = account_info.get("availableBalance", 0)
+            
+            return {
+                "balance": float(available_balance),
+                "wallet_balance": float(total_wallet_balance),
+            }
+        except Exception as e:
+            logger.error("get_balance_failed", error=str(e))
+            return {"balance": 0, "wallet_balance": 0}
 
     async def get_account_info(self) -> Dict[str, Any]:
         """Get account information including positions"""
@@ -212,7 +249,7 @@ class BinanceFuturesClient:
         """
         params = {
             "symbol": symbol,
-            "side": side.value.upper(),
+            "side": "BUY" if side == Side.LONG else "SELL",
             "type": self._convert_order_type(order_type),
             "quantity": quantity,
         }
@@ -356,6 +393,48 @@ class BinanceFuturesClient:
                 logger.debug("margin_type_already_set", symbol=symbol, margin_type=margin_type)
                 return {"msg": "No change needed"}
             raise
+
+    async def get_exchange_info(self) -> Dict[str, Any]:
+        """Get exchange information including symbol rules"""
+        result = await self._request("GET", "/fapi/v1/exchangeInfo", signed=False)
+        return result
+
+    async def get_symbol_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Get information for a specific symbol"""
+        info = await self.get_exchange_info()
+        for s in info["symbols"]:
+            if s["symbol"] == symbol:
+                return s
+        return None
+
+    def round_quantity(self, symbol_info: Dict[str, Any], quantity: float) -> float:
+        """Round quantity according to LOT_SIZE filter"""
+        lot_size_filter = next(f for f in symbol_info["filters"] if f["filterType"] == "LOT_SIZE")
+        step_size = float(lot_size_filter["stepSize"])
+        precision = 0
+        if step_size < 1:
+            # Safely handle step_size without decimal point
+            if "." in lot_size_filter["stepSize"]:
+                precision = len(lot_size_filter["stepSize"].split(".")[1].rstrip("0"))
+            else:
+                precision = 0
+        
+        # Use decimal formatting to avoid floating point issues if needed, 
+        # but round() is usually fine for Binance
+        rounded = round(quantity, precision)
+        if rounded == 0 and quantity > 0:
+            return step_size
+        return rounded
+
+    def round_price(self, symbol_info: Dict[str, Any], price: float) -> float:
+        """Round price according to PRICE_FILTER"""
+        price_filter = next(f for f in symbol_info["filters"] if f["filterType"] == "PRICE_FILTER")
+        tick_size = float(price_filter["tickSize"])
+        if "." in price_filter["tickSize"]:
+            precision = len(price_filter["tickSize"].split(".")[1].rstrip("0"))
+        else:
+            precision = 0
+        return round(price, precision)
 
     # === Helper methods ===
 

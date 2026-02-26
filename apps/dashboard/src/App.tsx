@@ -10,6 +10,9 @@ import { TradesPage } from './pages/TradesPage'
 import { RiskConfigPage } from './pages/RiskConfigPage'
 import { SystemHealthPage } from './pages/SystemHealthPage'
 import { EventsPage } from './pages/EventsPage'
+import { LearningPage } from './pages/LearningPage'
+import { SettingsPage } from './pages/SettingsPage'
+import { IntelPage } from './pages/IntelPage'
 
 function App() {
   const { isAuthenticated } = useAuthStore()
@@ -38,12 +41,15 @@ function App() {
       <Layout>
         <Routes>
           <Route path="/" element={<OverviewPage />} />
+          <Route path="/intel" element={<IntelPage />} />
           <Route path="/positions" element={<PositionsPage />} />
           <Route path="/orders" element={<OrdersPage />} />
           <Route path="/trades" element={<TradesPage />} />
           <Route path="/risk-config" element={<RiskConfigPage />} />
           <Route path="/system-health" element={<SystemHealthPage />} />
           <Route path="/events" element={<EventsPage />} />
+          <Route path="/learning" element={<LearningPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
       </Layout>

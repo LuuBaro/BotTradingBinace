@@ -1,130 +1,155 @@
-import React, { useEffect } from 'react'
+import React, { useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { LogOut, Menu, X, BarChart3, Zap } from 'lucide-react'
+import { LogOut, Menu, X, Zap, Brain, Activity, Shield, Settings, Grid, History, HeartPulse, Terminal, BookOpen, User } from 'lucide-react'
 import { useAuthStore } from '../store'
+import { useWebSocket } from '../hooks/useWebSocket'
+import { NotificationBell } from './NotificationBell'
+import { WalletIndicator } from './WalletIndicator'
 
 export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { logout, user } = useAuthStore()
   const location = useLocation()
-  const [sidebarOpen, setSidebarOpen] = React.useState(true)
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+
+  // Initialize WebSocket connection
+  useWebSocket()
 
   const menuItems = [
-    { path: '/', label: 'Overview', icon: '📊' },
-    { path: '/positions', label: 'Positions', icon: '📍' },
-    { path: '/orders', label: 'Orders', icon: '📋' },
-    { path: '/trades', label: 'Trades', icon: '💹' },
-    { path: '/risk-config', label: 'Risk Config', icon: '⚙️' },
-    { path: '/system-health', label: 'System Health', icon: '🏥' },
-    { path: '/events', label: 'Events & Audit', icon: '📅' },
-    { path: '/learning', label: 'Learning', icon: '🧠' },
+    { path: '/', label: 'Overview', icon: <Grid size={20} /> },
+    { path: '/intel', label: 'Neural Watch', icon: <Brain size={20} /> },
+    { path: '/positions', label: 'Active Zones', icon: <Activity size={20} /> },
+    { path: '/orders', label: 'Order Stack', icon: <Terminal size={20} /> },
+    { path: '/trades', label: 'Trace Logs', icon: <History size={20} /> },
+    { path: '/risk-config', label: 'Risk Vault', icon: <Shield size={20} /> },
+    { path: '/system-health', label: 'Health Nexus', icon: <HeartPulse size={20} /> },
+    { path: '/events', label: 'Audit Trail', icon: <Terminal size={20} /> },
+    { path: '/learning', label: 'Neural Opt', icon: <BookOpen size={20} /> },
+    { path: '/settings', label: 'System Prefs', icon: <Settings size={20} /> },
   ]
 
   return (
-    <div className="flex h-screen bg-slate-900 text-white overflow-hidden">
-      {/* Sidebar */}
+    <div className="flex h-screen bg-[#020617] text-slate-200 overflow-hidden font-sans selection:bg-blue-500/30">
+      {/* Premium Sidebar */}
       <aside
-        className={`${
-          sidebarOpen ? 'w-64' : 'w-20'
-        } bg-gradient-to-b from-slate-800 to-slate-900 border-r border-slate-700 transition-all duration-300 overflow-hidden flex flex-col shadow-xl`}
+        className={`${sidebarOpen ? 'w-72' : 'w-24'
+          } bg-[#020617] border-r border-white/5 transition-all duration-500 ease-in-out flex flex-col relative z-50`}
       >
-        {/* Logo */}
-        <div className="p-4 border-b border-slate-700 flex items-center gap-3 flex-shrink-0 hover:bg-slate-700 transition-colors">
-          <div className="p-2 bg-gradient-to-br from-blue-500 to-blue-700 rounded-lg">
-            <BarChart3 size={24} className="text-white" />
+        {/* Logo Section */}
+        <div className="h-24 flex items-center px-6 border-b border-white/5 gap-4">
+          <div className={`p-3 bg-gradient-to-br from-blue-600 to-blue-400 rounded-2xl shadow-lg shadow-blue-500/20 transform transition-transform duration-500 ${sidebarOpen ? 'rotate-0' : 'rotate-180'}`}>
+            <Zap size={24} className="text-white fill-current" />
           </div>
           {sidebarOpen && (
-            <div className="flex flex-col">
-              <span className="font-bold text-lg">Trading Bot</span>
-              <span className="text-xs text-slate-400">AI Powered</span>
+            <div className="flex flex-col animate-fadeIn">
+              <span className="font-black text-xl tracking-tighter text-white">ANTIGRAVITY</span>
+              <span className="text-[9px] font-black text-blue-400 uppercase tracking-[0.3em]">Quantum Engine</span>
             </div>
           )}
         </div>
 
-        {/* Menu */}
-        <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
+        {/* Navigation Menu */}
+        <nav className="flex-1 px-4 py-8 space-y-2 overflow-y-auto custom-scrollbar">
           {menuItems.map((item) => {
             const isActive = location.pathname === item.path
             return (
               <Link
                 key={item.path}
                 to={item.path}
-                className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-all duration-200 group ${
-                  isActive
-                    ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg'
-                    : 'text-slate-300 hover:bg-slate-700 hover:text-white'
-                }`}
+                className={`flex items-center gap-4 px-4 py-3.5 rounded-2xl transition-all duration-300 group relative ${isActive
+                  ? 'bg-blue-600 text-white shadow-2xl shadow-blue-500/20'
+                  : 'text-slate-500 hover:text-white hover:bg-white/5 '
+                  }`}
               >
-                <span className="text-xl flex-shrink-0">{item.icon}</span>
+                <div className={`transition-transform duration-300 ${isActive ? 'scale-110' : 'group-hover:scale-110'}`}>
+                  {item.icon}
+                </div>
                 {sidebarOpen && (
-                  <span className="font-medium flex-1">{item.label}</span>
+                  <span className={`font-bold text-sm tracking-tight flex-1 animate-fadeIn`}>{item.label}</span>
                 )}
-                {isActive && sidebarOpen && (
-                  <div className="w-1 h-1 bg-white rounded-full"></div>
+                {isActive && (
+                  <div className="absolute left-0 w-1.5 h-6 bg-white rounded-r-full shadow-[4px_0_15px_rgba(255,255,255,0.5)]"></div>
                 )}
               </Link>
             )
           })}
         </nav>
 
-        {/* Footer */}
-        {sidebarOpen && (
-          <div className="p-4 border-t border-slate-700 space-y-3">
-            <div className="bg-slate-700 rounded-lg p-3 space-y-2">
-              <div className="flex items-center gap-2 text-slate-300">
-                <Zap size={14} />
-                <span className="text-xs">Status: Running</span>
+        {/* Sidebar Footer - System Identity */}
+        <div className="p-6 border-t border-white/5 bg-slate-950/30">
+          {sidebarOpen ? (
+            <div className="p-4 bg-white/5 rounded-2xl border border-white/5 space-y-4 animate-fadeIn">
+              <div className="flex items-center gap-3">
+                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-glow"></div>
+                <span className="text-[10px] font-black uppercase text-emerald-400 tracking-widest">Global Mainnet</span>
               </div>
-              <div className="text-xs text-slate-400">
-                Mode: Demo
+              <div className="flex justify-between items-center text-[9px] font-mono text-slate-500">
+                <span>V.4.2.0-STABLE</span>
+                <span>94.2 MS</span>
+              </div>
+            </div>
+          ) : (
+            <div className="flex justify-center">
+              <div className="w-2 h-2 bg-emerald-500 rounded-full animate-glow"></div>
+            </div>
+          )}
+        </div>
+      </aside>
+
+      {/* Main Orchestrator */}
+      <div className="flex-1 flex flex-col overflow-hidden bg-mesh relative">
+        {/* Glow Effects */}
+        <div className="absolute top-0 left-1/4 w-[50%] h-[30%] bg-blue-500/5 blur-[120px] pointer-events-none"></div>
+        <div className="absolute bottom-0 right-1/4 w-[40%] h-[20%] bg-purple-500/5 blur-[100px] pointer-events-none"></div>
+
+        {/* Context-Aware Header */}
+        <header className="h-24 glass-dark border-b border-white/5 px-10 flex items-center justify-between flex-shrink-0 relative z-40">
+          <div className="flex items-center gap-8">
+            <button
+              onClick={() => setSidebarOpen(!sidebarOpen)}
+              className="p-3 bg-white/5 hover:bg-white/10 rounded-2xl transition-all text-slate-400 hover:text-white active:scale-95 border border-white/5"
+            >
+              {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
+            </button>
+            <div className="hidden xl:flex items-center gap-4 text-slate-500">
+              <div className="flex items-center gap-2 px-4 py-2 bg-white/5 rounded-xl border border-white/5">
+                <Activity size={12} />
+                <span className="text-[10px] font-black uppercase tracking-widest">Live Execution Stack</span>
               </div>
             </div>
           </div>
-        )}
-      </aside>
-
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Header */}
-        <header className="bg-gradient-to-r from-slate-800 to-slate-900 border-b border-slate-700 px-6 py-4 flex items-center justify-between flex-shrink-0 shadow-lg">
-          <button
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="p-2 hover:bg-slate-700 rounded-lg transition-colors text-slate-300 hover:text-white"
-            title={sidebarOpen ? "Close sidebar" : "Open sidebar"}
-          >
-            {sidebarOpen ? <X size={24} /> : <Menu size={24} />}
-          </button>
 
           <div className="flex items-center gap-6">
-            {/* Status Indicator */}
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-              <span className="text-sm text-slate-300">Connected</span>
+            <WalletIndicator />
+            <NotificationBell />
+
+            {/* User Profile Hook */}
+            <div className="flex items-center gap-4 pl-8 border-l border-white/10">
+              <div className="text-right hidden sm:block">
+                <p className="text-sm font-black text-white tracking-tight">{user?.username || 'ROOT_SUDO'}</p>
+                <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest">{user?.role || 'SYSTEM_ADMIN'}</p>
+              </div>
+              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-slate-800 to-slate-900 border border-white/10 flex items-center justify-center shadow-xl group hover:border-blue-500/50 transition-all cursor-pointer">
+                <User size={20} className="text-slate-400 group-hover:text-blue-400 transition-colors" />
+              </div>
             </div>
 
-            {/* User Info */}
-            <div className="hidden sm:block">
-              <p className="text-sm font-medium">{user?.username || 'Guest'}</p>
-              <p className="text-xs text-slate-400">{user?.role || 'User'}</p>
-            </div>
-
-            {/* Logout Button */}
+            {/* Logout Sequence */}
             <button
               onClick={() => {
                 logout()
                 window.location.href = '/login'
               }}
-              className="btn btn-danger btn-sm"
-              title="Logout"
+              className="p-3 bg-rose-500/10 hover:bg-rose-500 text-rose-500 hover:text-white rounded-2xl transition-all active:scale-95 border border-rose-500/20 hover:shadow-lg hover:shadow-rose-500/20"
+              title="Terminate Session"
             >
-              <LogOut size={18} />
-              <span className="hidden sm:inline">Logout</span>
+              <LogOut size={20} />
             </button>
           </div>
         </header>
 
-        {/* Page Content */}
-        <main className="flex-1 overflow-auto p-6 bg-gradient-to-br from-slate-900 via-slate-900 to-slate-900 space-y-6">
-          <div className="animate-slideInUp">
+        {/* Content Viewport */}
+        <main className="flex-1 overflow-auto custom-scrollbar relative z-10 px-10 py-8">
+          <div className="animate-slideUp max-w-[1600px] mx-auto">
             {children}
           </div>
         </main>

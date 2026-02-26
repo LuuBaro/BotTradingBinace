@@ -2,6 +2,7 @@
 FastAPI Server - REST API + WebSocket for dashboard
 """
 import asyncio
+import sqlite3
 from datetime import datetime, timedelta
 from typing import List
 from contextlib import asynccontextmanager
@@ -19,10 +20,12 @@ from packages.shared.models import (
     Decision,
     RiskLog,
     AuditLog,
+    Signal,
 )
 from packages.shared.schemas import RiskConfig
 from packages.shared.logger import logger
 from apps.api.phase4_routes import router as phase4_router
+from apps.api.phase6_routes import router as phase6_router
 
 
 # Lifespan context manager
@@ -30,7 +33,10 @@ from apps.api.phase4_routes import router as phase4_router
 async def lifespan(app: FastAPI):
     """Initialize and cleanup on startup/shutdown"""
     logger.info("api_server_starting")
-    await init_db()
+    try:
+        await init_db()
+    except sqlite3.OperationalError as exc:
+        logger.warning("api_init_db_skipped", error=str(exc))
     yield
     logger.info("api_server_shutting_down")
     await close_db()
@@ -54,6 +60,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(phase4_router)
+app.include_router(phase6_router)
 
 
 # Dependency to get database session
@@ -62,163 +69,7 @@ async def get_db() -> AsyncSession:
         yield session
 
 
-# === Health & Status Endpoints ===
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
-
-
-@app.get("/bot/status")
-async def get_bot_status(db: AsyncSession = Depends(get_db)):
-    """Get bot configuration and status"""
-    # Get active config
-    result = await db.execute(
-        select(BotConfig).where(BotConfig.is_active == True).order_by(desc(BotConfig.id))
-    )
-    config = result.scalar_one_or_none()
-
-    if not config:
-        raise HTTPException(status_code=404, detail="No active bot configuration")
-
-    # Get last decision
-    last_decision_result = await db.execute(
-        select(Decision).order_by(desc(Decision.timestamp)).limit(1)
-    )
-    last_decision = last_decision_result.scalar_one_or_none()
-
-    # Count positions
-    positions_result = await db.execute(select(Position))
-    positions_count = len(positions_result.scalars().all())
-
-    return {
-        "env": config.env,
-        "version": config.version,
-        "symbols": config.symbols_json,
-        "risk_config": config.risk_json,
-        "active_positions": positions_count,
-        "last_decision_at": last_decision.timestamp.isoformat() if last_decision else None,
-        "created_at": config.created_at.isoformat(),
-    }
-
-
-# === Events Endpoints ===
-
-@app.get("/events")
-async def get_events(
-    limit: int = Query(default=100, le=1000),
-    level: str | None = None,
-    db: AsyncSession = Depends(get_db),
-):
-    """Get system events"""
-    query = select(Event).order_by(desc(Event.timestamp))
-    
-    if level:
-        query = query.where(Event.level == level.upper())
-    
-    query = query.limit(limit)
-    
-    result = await db.execute(query)
-    events = result.scalars().all()
-
-    return {
-        "events": [
-            {
-                "id": e.id,
-                "timestamp": e.timestamp.isoformat(),
-                "level": e.level,
-                "code": e.code,
-                "message": e.message,
-                "trace_id": e.trace_id,
-                "data": e.data_json,
-            }
-            for e in events
-        ]
-    }
-
-
-# === Positions Endpoints ===
-
-@app.get("/positions")
-async def get_positions(db: AsyncSession = Depends(get_db)):
-    """Get all current positions"""
-    result = await db.execute(select(Position).order_by(desc(Position.opened_at)))
-    positions = result.scalars().all()
-
-    return {
-        "positions": [
-            {
-                "id": p.id,
-                "symbol": p.symbol,
-                "side": p.side,
-                "qty": p.qty,
-                "entry_price": p.entry_price,
-                "unrealized_pnl": p.unrealized_pnl,
-                "opened_at": p.opened_at.isoformat(),
-            }
-            for p in positions
-        ]
-    }
-
-
-# === Orders Endpoints ===
-
-@app.get("/orders")
-async def get_orders(
-    status: str | None = None,
-    limit: int = Query(default=50, le=500),
-    db: AsyncSession = Depends(get_db),
-):
-    """Get orders"""
-    query = select(Order).order_by(desc(Order.created_at))
-    
-    if status:
-        query = query.where(Order.status == status)
-    
-    query = query.limit(limit)
-    
-    result = await db.execute(query)
-    orders = result.scalars().all()
-
-    return {
-        "orders": [
-            {
-                "id": o.id,
-                "client_order_id": o.client_order_id,
-                "exchange_order_id": o.exchange_order_id,
-                "symbol": o.symbol,
-                "side": o.side,
-                "order_type": o.order_type,
-                "status": o.status,
-                "quantity": o.quantity,
-                "filled_qty": o.filled_qty,
-                "avg_price": o.avg_price,
-                "created_at": o.created_at.isoformat(),
-            }
-            for o in orders
-        ]
-    }
-
-
-# === Risk Config Endpoints ===
-
-@app.get("/risk/config")
-async def get_risk_config(db: AsyncSession = Depends(get_db)):
-    """Get active risk configuration"""
-    result = await db.execute(
-        select(BotConfig).where(BotConfig.is_active == True).order_by(desc(BotConfig.id))
-    )
-    config = result.scalar_one_or_none()
-
-    if not config:
-        raise HTTPException(status_code=404, detail="No active configuration")
-
-    return {
-        "version": config.version,
-        "risk_config": config.risk_json,
-        "created_at": config.created_at.isoformat(),
-    }
+# Endpoints consolidated in phase4_routes.py
 
 
 @app.post("/risk/config")
@@ -329,14 +180,7 @@ async def resume_worker(db: AsyncSession = Depends(get_db)):
     }
 
 
-@app.get("/actions/status")
-async def get_worker_status():
-    """Get worker status (paused/running)"""
-    return {
-        "is_paused": worker_state["is_paused"],
-        "pause_reason": worker_state["pause_reason"],
-        "paused_at": worker_state["paused_at"],
-    }
+# Actions status and approval endpoints moved to phase4_routes.py
 
 
 # === Reconciliation Endpoints (Phase 2) ===

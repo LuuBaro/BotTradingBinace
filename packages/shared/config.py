@@ -36,7 +36,7 @@ class Settings(BaseSettings):
 
     # API Server
     api_host: str = Field(default="0.0.0.0", description="API server host")
-    api_port: int = Field(default=8000, description="API server port")
+    api_port: int = Field(default=8001, description="API server port")
 
     # Worker
     worker_loop_interval_sec: int = Field(
@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = Field(default="INFO", description="Logging level")
     log_to_db: bool = Field(default=True, description="Log events to database")
+
+    # Security / JWT (Dashboard Auth)
+    jwt_secret: str | None = Field(default=None, description="JWT secret key")
 
     # Binance API (Phase 2+)
     binance_api_key: str = Field(default="", description="Binance API key")
@@ -57,8 +60,11 @@ class Settings(BaseSettings):
     )
 
     # LLM Providers (Phase 5+)
+    selected_llm: str = Field(default="mock", description="Selected LLM provider")
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
+    openai_model: str = Field(default="gpt-4", description="OpenAI model")
     anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
+    anthropic_model: str = Field(default="claude-3-sonnet", description="Anthropic model")
     use_local_llm: bool = Field(default=False, description="Use local LLM")
 
     # Telegram Bot (Phase 3+)
