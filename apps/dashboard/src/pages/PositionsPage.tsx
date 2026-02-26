@@ -231,11 +231,16 @@ export const PositionsPage: React.FC = () => {
                   const isProfit = pnl >= 0
                   const leverage = pos.leverage || 1
                   const margin = (pos.entry_price * pos.qty) / leverage
+                  
+                  // Get correct side from both old and new API formats
+                  const sideStr = (pos.side || pos.binance_data?.positionAmt || '').toString()
+                  const isLong = sideStr.toUpperCase().includes('LONG') || (parseFloat(sideStr) > 0)
+                  const positionSide = isLong ? 'LONG' : 'SHORT'
 
                   // Correct ROI calculation for Futures
                   const pnlPercent = ((pnl / margin) * 100).toFixed(2)
 
-                  const currentPrice = pos.side === 'long'
+                  const currentPrice = isLong
                     ? pos.entry_price + (pnl / pos.qty)
                     : pos.entry_price - (pnl / pos.qty)
 
@@ -245,19 +250,19 @@ export const PositionsPage: React.FC = () => {
                         <div className="flex flex-col">
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-black text-white font-mono">{pos.symbol}</span>
-                            <span className={`text-[8px] px-1.5 py-0.5 rounded font-black uppercase ${pos.side.toLowerCase() === 'long' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                            <span className={`text-[8px] px-1.5 py-0.5 rounded font-black uppercase ${isLong ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
                               Perp {leverage}x
                             </span>
                           </div>
-                          <span className={`text-[9px] font-bold ${pos.side.toLowerCase() === 'long' ? 'text-emerald-500' : 'text-rose-500'} uppercase mt-1`}>
-                            {pos.side.toUpperCase()}
+                          <span className={`text-[9px] font-bold ${isLong ? 'text-emerald-500' : 'text-rose-500'} uppercase mt-1`}>
+                            {positionSide} {pos.source === 'binance_live' ? '🔴 LIVE' : ''}
                           </span>
                         </div>
                       </td>
                       <td className="px-6 py-6">
                         <div className="flex flex-col">
-                          <span className={`text-sm font-mono font-black ${pos.side.toLowerCase() === 'long' ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {pos.side.toLowerCase() === 'long' ? '+' : '-'}{pos.qty.toLocaleString(undefined, { minimumFractionDigits: 3 })}
+                          <span className={`text-sm font-mono font-black ${isLong ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {isLong ? '+' : '-'}{pos.qty.toLocaleString(undefined, { minimumFractionDigits: 3 })}
                           </span>
                           <span className="text-[9px] font-bold text-slate-600 uppercase">{pos.symbol.replace('USDT', '')}</span>
                         </div>
@@ -266,7 +271,7 @@ export const PositionsPage: React.FC = () => {
                         <span className="text-sm font-mono font-bold text-slate-300">{pos.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
                       </td>
                       <td className="px-6 py-6">
-                        <span className="text-sm font-mono font-bold text-blue-400">{currentPrice.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                        <span className="text-sm font-mono font-bold text-blue-400">{(pos.mark_price || currentPrice).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
                       </td>
                       <td className="px-6 py-6">
                         <span className="text-sm font-mono font-bold text-amber-500/80">
@@ -293,7 +298,7 @@ export const PositionsPage: React.FC = () => {
                         <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button
                             onClick={async () => {
-                              if (confirm(`Bạn có chắc chắn muốn Đóng vị thế (Close Position) ${pos.symbol} ngay lập tức không?`)) {
+                              if (confirm(`Xác nhận Đóng vị thế (Market Close) cho ${pos.symbol}?`)) {
                                 try {
                                   await api.closePosition(pos.symbol)
                                   alert(`Đã gửi yêu cầu đóng vị thế ${pos.symbol}`)
@@ -348,7 +353,7 @@ export const PositionsPage: React.FC = () => {
                       <div className="flex items-center gap-2 opacity-50">
                         <Clock size={12} className="text-slate-400" />
                         <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-                          {formatDistanceToNow(new Date(pos.opened_at), { addSuffix: true })}
+                          {pos.opened_at ? formatDistanceToNow(new Date(pos.opened_at), { addSuffix: true }) : 'N/A'}
                         </span>
                       </div>
                     </div>
@@ -490,7 +495,7 @@ export const PositionsPage: React.FC = () => {
                                 <span className="text-[8px] font-mono text-slate-600 uppercase tracking-tighter">{order.status}</span>
                               </div>
                             </div>
-                            <span className="text-[9px] font-mono text-slate-500">{formatDistanceToNow(new Date(order.created_at), { addSuffix: true })}</span>
+                            <span className="text-[9px] font-mono text-slate-500">{order.created_at ? formatDistanceToNow(new Date(order.created_at), { addSuffix: true }) : 'N/A'}</span>
                           </div>
                         ))
                       }
@@ -524,7 +529,7 @@ export const PositionsPage: React.FC = () => {
                   <button
                     className="btn border-rose-500/20 bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white p-4 rounded-2xl group transition-all"
                     onClick={async () => {
-                      if (confirm(`Bạn có chắc chắn muốn Đóng vị thế (Close Position) ${pos.symbol} không?`)) {
+                      if (confirm(`Xác nhận Đóng vị thế (Market Close) cho ${pos.symbol}?`)) {
                         try {
                           await api.closePosition(pos.symbol)
                           alert(`Close request sent for ${pos.symbol}`)

@@ -592,6 +592,198 @@ async def get_dashboard_learning_metrics() -> Dict[str, Any]:
         }
 
 
+@router.get("/learning/analytics-detail")
+async def get_detailed_analytics() -> Dict[str, Any]:
+    """
+    Get detailed trading analytics for AI training
+    Returns comprehensive metrics for learning and optimization
+    """
+    try:
+        agent = await _get_learning_agent_from_db()
+        if not agent.trades or len(agent.trades) < 5:
+            return {
+                "status": "insufficient_data",
+                "trades_recorded": len(agent.trades),
+                "needed_for_analysis": 5
+            }
+
+        report = agent.analyze()
+        
+        # Group trades by regime
+        regime_analysis = {}
+        for regime in ['trend', 'range', 'volatile', 'sideways']:
+            trades_in_regime = [t for t in agent.trades if getattr(t, 'regime', 'range') == regime]
+            if trades_in_regime:
+                wins = len([t for t in trades_in_regime if getattr(t, 'pnl', 0) > 0])
+                losses = len([t for t in trades_in_regime if getattr(t, 'pnl', 0) < 0])
+                total_pnl = sum(getattr(t, 'pnl', 0) for t in trades_in_regime)
+                regime_analysis[regime] = {
+                    "count": len(trades_in_regime),
+                    "win_rate": wins / len(trades_in_regime) if trades_in_regime else 0,
+                    "total_pnl": total_pnl,
+                    "avg_pnl": total_pnl / len(trades_in_regime),
+                    "best_trade": max(getattr(t, 'pnl', 0) for t in trades_in_regime) if trades_in_regime else 0,
+                    "worst_trade": min(getattr(t, 'pnl', 0) for t in trades_in_regime) if trades_in_regime else 0,
+                }
+        
+        # Best performing trades
+        best_trades = sorted(
+            [{"pnl": getattr(t, 'pnl', 0), "symbol": getattr(t, 'symbol', 'N/A'), "rr": getattr(t, 'rr', 0)} for t in agent.trades],
+            key=lambda x: x['pnl'],
+            reverse=True
+        )[:10]
+        
+        # Worst trading patterns
+        losing_trades = sorted(
+            [{"pnl": getattr(t, 'pnl', 0), "symbol": getattr(t, 'symbol', 'N/A'), "rr": getattr(t, 'rr', 0), "regime": getattr(t, 'regime', 'N/A')} for t in agent.trades],
+            key=lambda x: x['pnl']
+        )[:10]
+        
+        # Time-based analysis (if holding_time available)
+        holding_times = []
+        for t in agent.trades:
+            if hasattr(t, 'holding_time') and getattr(t, 'holding_time'):
+                holding_times.append({
+                    "seconds": getattr(t, 'holding_time', 0),
+                    "minutes": getattr(t, 'holding_time', 0) / 60,
+                    "pnl": getattr(t, 'pnl', 0),
+                    "symbol": getattr(t, 'symbol', 'N/A')
+                })
+        
+        return {
+            "status": "success",
+            "trades_total": len(agent.trades),
+            "analysis_metrics": {
+                "overall_stats": report.stats.dict() if report.stats else None,
+                "regime_breakdown": regime_analysis,
+                "best_trades": best_trades,
+                "losing_patterns": losing_trades,
+                "holding_time_analysis": holding_times[:20],
+                "losing_patterns_detail": [p.dict() for p in report.losing_patterns] if report.losing_patterns else [],
+                "recommendations": report.recommendations[:10] if report.recommendations else [],
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Detailed analytics failed: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@router.get("/learning/symbols-performance")
+async def get_symbols_performance() -> Dict[str, Any]:
+    """Get performance breakdown by trading symbol"""
+    try:
+        agent = await _get_learning_agent_from_db()
+        if not agent.trades:
+            return {"symbols": {}}
+
+        symbols_data = {}
+        for t in agent.trades:
+            symbol = getattr(t, 'symbol', 'UNKNOWN')
+            if symbol not in symbols_data:
+                symbols_data[symbol] = {
+                    "count": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "total_pnl": 0,
+                    "trades": []
+                }
+            
+            pnl = getattr(t, 'pnl', 0)
+            symbols_data[symbol]["count"] += 1
+            symbols_data[symbol]["total_pnl"] += pnl
+            if pnl > 0:
+                symbols_data[symbol]["wins"] += 1
+            elif pnl < 0:
+                symbols_data[symbol]["losses"] += 1
+            symbols_data[symbol]["trades"].append({
+                "pnl": pnl,
+                "rr": getattr(t, 'rr', 0),
+                "regime": getattr(t, 'regime', 'N/A')
+            })
+
+        for symbol, data in symbols_data.items():
+            data["win_rate"] = data["wins"] / data["count"] if data["count"] > 0 else 0
+            data["avg_pnl"] = data["total_pnl"] / data["count"]
+
+        return {
+            "symbols": symbols_data,
+            "total_symbols": len(symbols_data)
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Symbols performance failed: {str(e)}")
+        return {"symbols": {}, "error": str(e)}
+
+
+@router.get("/learning/training-insights")
+async def get_training_insights() -> Dict[str, Any]:
+    """Get AI training insights and recommendations"""
+    try:
+        agent = await _get_learning_agent_from_db()
+        if not agent.trades or len(agent.trades) < 5:
+            return {
+                "status": "insufficient_data",
+                "message": "Need at least 5 trades for meaningful insights"
+            }
+
+        report = agent.analyze()
+        
+        insights = {
+            "status": "success",
+            "training_focus_areas": [],
+            "high_priority_fixes": [],
+            "low_risk_opportunities": [],
+            "confidence_score": 0.0
+        }
+
+        # Generate insights based on analysis
+        if report.stats:
+            if report.stats.win_rate < 0.35:
+                insights["high_priority_fixes"].append({
+                    "priority": "critical",
+                    "issue": "Win rate below 35%",
+                    "action": "Review entry conditions - may need stricter filters",
+                    "impact": "Direct impact on profitability"
+                })
+            
+            if report.stats.profit_factor < 1.0:
+                insights["high_priority_fixes"].append({
+                    "priority": "critical",
+                    "issue": "Profit factor below 1.0",
+                    "action": "Average winning trade too small vs losing trades",
+                    "impact": "Unprofitable strategy"
+                })
+            
+            if report.stats.max_drawdown > 20:
+                insights["high_priority_fixes"].append({
+                    "priority": "high",
+                    "issue": "Drawdown exceeds 20%",
+                    "action": "Consider tighter risk management",
+                    "impact": "Account volatility risk"
+                })
+        
+        # Best practices from winning patterns
+        if report.recommendations:
+            insights["training_focus_areas"] = [
+                {
+                    "focus": rec,
+                    "confidence": 0.75
+                } for rec in report.recommendations[:5]
+            ]
+
+        insights["confidence_score"] = min(1.0, len(agent.trades) / 100.0)
+
+        return insights
+
+    except Exception as e:
+        logger.error(f"❌ Training insights failed: {str(e)}")
+        return {"status": "error", "error": str(e)}
+
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -613,3 +805,229 @@ async def _trigger_learning_analysis():
 
     except Exception as e:
         logger.error(f"❌ Background learning analysis failed: {str(e)}")
+
+
+# Enhanced Real-Time Data Endpoints
+# ============================================================================
+
+@router.get("/learning/market-data")
+async def get_market_data(
+    symbols: str = Query("BTCUSDT,ETHUSDT", description="Comma-separated symbols"),
+    interval: str = Query("1h", description="Kline interval (1m, 5m, 15m, 1h, 4h, 1d)"),
+    limit: int = Query(100, ge=1, le=500, description="Kline limit (max 500)"),
+) -> Dict[str, Any]:
+    """
+    Fetch real Binance kline data for interactive charts
+    Supports multiple symbols and time frame selection
+    """
+    try:
+        from packages.shared.exchange.binance_futures import BinanceFuturesClient
+        
+        symbol_list = [s.strip().upper() for s in symbols.split(',')]
+        klines_data = {}
+        
+        async with BinanceFuturesClient() as client:
+            for symbol in symbol_list:
+                try:
+                    klines = await client.get_klines(symbol, interval=interval, limit=limit)
+                    # Format: [open_time, open, high, low, close, volume, close_time, ...]
+                    klines_data[symbol] = [
+                        {
+                            "time": int(k[0]),
+                            "open": float(k[1]),
+                            "high": float(k[2]),
+                            "low": float(k[3]),
+                            "close": float(k[4]),
+                            "volume": float(k[5]),
+                        }
+                        for k in klines
+                    ]
+                except Exception as e:
+                    logger.warning(f"Failed to fetch klines for {symbol}: {str(e)}")
+                    klines_data[symbol] = []
+        
+        return {
+            "status": "success",
+            "interval": interval,
+            "symbols_count": len(symbol_list),
+            "data": klines_data
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to fetch market data: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@router.get("/learning/trades-timeline")
+async def get_trades_timeline(
+    start_time: Optional[int] = Query(None, description="Start timestamp in milliseconds"),
+    end_time: Optional[int] = Query(None, description="End timestamp in milliseconds"),
+    symbol: Optional[str] = Query(None, description="Filter by symbol"),
+) -> Dict[str, Any]:
+    """
+    Get real trades filtered by time range for timeline analysis
+    Supports dragging/zooming on equity curve
+    """
+    try:
+        agent = await _get_learning_agent_from_db()
+        
+        # Filter trades by time range
+        filtered_trades = agent.trades if agent.trades else []
+        
+        if start_time or end_time:
+            start_dt = datetime.fromtimestamp(start_time / 1000) if start_time else None
+            end_dt = datetime.fromtimestamp(end_time / 1000) if end_time else None
+            
+            filtered_trades = [
+                t for t in filtered_trades 
+                if (not start_dt or getattr(t, 'entry_time', datetime.now()) >= start_dt) and
+                   (not end_dt or getattr(t, 'exit_time', datetime.now()) <= end_dt)
+            ]
+        
+        if symbol:
+            filtered_trades = [
+                t for t in filtered_trades 
+                if getattr(t, 'symbol', '') == symbol.upper()
+            ]
+        
+        # Calculate equity curve (cumulative PnL)
+        cumulative_pnl = 0
+        equity_curve = []
+        
+        for trade in sorted(filtered_trades, key=lambda t: getattr(t, 'exit_time', datetime.now())):
+            pnl = getattr(trade, 'pnl', 0)
+            cumulative_pnl += pnl
+            
+            equity_curve.append({
+                "timestamp": int(getattr(trade, 'exit_time', datetime.now()).timestamp() * 1000),
+                "symbol": getattr(trade, 'symbol', 'UNKNOWN'),
+                "pnl": pnl,
+                "cumulative_pnl": cumulative_pnl,
+                "win": pnl > 0,
+                "holding_minutes": int(getattr(trade, 'holding_time_minutes', 0) or 0),
+            })
+        
+        # Calculate statistics
+        total_trades = len(filtered_trades)
+        winning_trades = len([t for t in filtered_trades if getattr(t, 'pnl', 0) > 0])
+        losing_trades = len([t for t in filtered_trades if getattr(t, 'pnl', 0) < 0])
+        total_pnl = sum(getattr(t, 'pnl', 0) for t in filtered_trades)
+        
+        return {
+            "status": "success",
+            "time_range": {
+                "start": start_time,
+                "end": end_time
+            },
+            "statistics": {
+                "total_trades": total_trades,
+                "winning_trades": winning_trades,
+                "losing_trades": losing_trades,
+                "win_rate": (winning_trades / total_trades * 100) if total_trades > 0 else 0,
+                "total_pnl": total_pnl,
+                "avg_pnl": total_pnl / total_trades if total_trades > 0 else 0,
+            },
+            "equity_curve": equity_curve,
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to get trades timeline: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@router.get("/learning/performance-by-timeframe")
+async def get_performance_by_timeframe(
+    timeframe: str = Query("1h", description="Timeframe (1h, 4h, 1d, 1w)"),
+) -> Dict[str, Any]:
+    """
+    Get performance breakdown by timeframe (useful for market hours analysis)
+    """
+    try:
+        agent = await _get_learning_agent_from_db()
+        if not agent.trades:
+            return {"timeframes": {}}
+        
+        from datetime import timedelta as td
+        
+        # Map timeframe string to hours/days
+        timeframe_map = {
+            "1h": (3600, 1),      # 1 hour
+            "4h": (14400, 4),     # 4 hours  
+            "1d": (86400, 24),    # 1 day
+            "1w": (604800, 168),  # 1 week
+        }
+        
+        seconds_per_interval, hours_per_interval = timeframe_map.get(timeframe, (3600, 1))
+        
+        time_performance = {}
+        
+        for trade in agent.trades:
+            entry_time = getattr(trade, 'entry_time', datetime.now())
+            
+            # Group by the start of the timeframe
+            if timeframe == "1h":
+                key = entry_time.replace(minute=0, second=0, microsecond=0)
+            elif timeframe == "4h":
+                hour = (entry_time.hour // 4) * 4
+                key = entry_time.replace(hour=hour, minute=0, second=0, microsecond=0)
+            elif timeframe == "1d":
+                key = entry_time.replace(hour=0, minute=0, second=0, microsecond=0)
+            elif timeframe == "1w":
+                days_since_monday = entry_time.weekday()
+                key = (entry_time - td(days=days_since_monday)).replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                key = entry_time.replace(minute=0, second=0, microsecond=0)
+            
+            key_str = key.isoformat()
+            
+            if key_str not in time_performance:
+                time_performance[key_str] = {
+                    "timestamp": int(key.timestamp() * 1000),
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "total_pnl": 0,
+                    "symbols": set()
+                }
+            
+            pnl = getattr(trade, 'pnl', 0)
+            time_performance[key_str]["trades"] += 1
+            time_performance[key_str]["total_pnl"] += pnl
+            time_performance[key_str]["symbols"].add(getattr(trade, 'symbol', 'UNKNOWN'))
+            
+            if pnl > 0:
+                time_performance[key_str]["wins"] += 1
+            elif pnl < 0:
+                time_performance[key_str]["losses"] += 1
+        
+        # Convert set to list and calculate metrics
+        result = []
+        for key_str, data in sorted(time_performance.items()):
+            result.append({
+                "period": key_str,
+                "timestamp": data["timestamp"],
+                "trades": data["trades"],
+                "win_rate": (data["wins"] / data["trades"] * 100) if data["trades"] > 0 else 0,
+                "total_pnl": data["total_pnl"],
+                "avg_pnl": data["total_pnl"] / data["trades"] if data["trades"] > 0 else 0,
+                "symbols_count": len(data["symbols"])
+            })
+        
+        return {
+            "status": "success",
+            "timeframe": timeframe,
+            "performance_data": result
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to get performance by timeframe: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }

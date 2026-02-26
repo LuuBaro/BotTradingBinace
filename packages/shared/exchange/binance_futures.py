@@ -333,6 +333,12 @@ class BinanceFuturesClient:
         result = await self._request("GET", "/fapi/v1/openOrders", params=params, signed=True)
         return result
 
+    async def get_all_orders(self, symbol: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get all orders (active, canceled, filled) for a symbol"""
+        params = {"symbol": symbol, "limit": limit}
+        result = await self._request("GET", "/fapi/v1/allOrders", params=params, signed=True)
+        return result
+
     # === Market data endpoints ===
 
     async def get_ticker_price(self, symbol: str) -> Dict[str, Any]:

@@ -71,8 +71,16 @@ export class ApiClient {
   }
 
   async getPositions() {
-    const res = await this.axiosInstance.get('positions')
-    return res.data
+    // Use /live endpoint to get real-time data directly from Binance
+    // Falls back to regular /positions if /live is not available
+    try {
+      const res = await this.axiosInstance.get('positions/live')
+      return res.data?.positions || []
+    } catch (error) {
+      // Fallback to local database positions if live endpoint fails
+      const res = await this.axiosInstance.get('positions')
+      return res.data
+    }
   }
 
   async getOrders() {

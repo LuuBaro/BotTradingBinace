@@ -16,9 +16,145 @@ class TraderStub:
     Generates random but structurally valid decisions
     """
 
-    def __init__(self):
+    def __init__(self, max_position_pct: float = 0.05):
         self.decision_count = 0
-        logger.info("trader_stub_initialized")
+        self.position_peaks = {}  # Track highest price for trailing stop
+        self.max_position_pct = max_position_pct  # Store limit for validation
+        logger.info("trader_stub_initialized", max_position_pct=max_position_pct)
+    
+    def calculate_dynamic_targets(self, entry_price: float, side: Side, volatility: float = 0.02) -> tuple[float, float]:
+        """
+        Calculate SL/TP with randomization to avoid Binance anti-bot detection
+        
+        Args:
+            entry_price: Entry price
+            side: LONG or SHORT
+            volatility: Market volatility (0-1)
+            
+        Returns:
+            (stop_loss, take_profit) with randomization applied
+        """
+        # Base percentages với randomization để tránh pattern
+        sl_pct = random.uniform(0.018, 0.025)  # 1.8% - 2.5%
+        tp_pct = random.uniform(0.035, 0.055)  # 3.5% - 5.5%
+        
+        # Adjust based on volatility
+        if volatility > 0.03:  # High volatility
+            tp_pct *= 1.5
+            sl_pct *= 1.2
+        
+        if side == Side.LONG:
+            stop_loss = entry_price * (1 - sl_pct)
+            take_profit = entry_price * (1 + tp_pct)
+        else:
+            stop_loss = entry_price * (1 + sl_pct)
+            take_profit = entry_price * (1 - tp_pct)
+        
+        # Add slight randomness to avoid round numbers (anti-bot)
+        stop_loss += random.uniform(-3, 3)
+        take_profit += random.uniform(-5, 5)
+        
+        return round(stop_loss, 2), round(take_profit, 2)
+    
+    def should_close_with_trailing_stop(
+        self, 
+        position_id: str,
+        entry_price: float, 
+        current_price: float, 
+        side: Side,
+        trailing_activation_pct: float = 0.04,  # Activate at +4% profit
+        trailing_distance_pct: float = 0.02     # Trail at -2% from peak
+    ) -> tuple[bool, str]:
+        """
+        Check if position should be closed with trailing stop
+        
+        Args:
+            position_id: Unique position identifier
+            entry_price: Original entry price
+            current_price: Current market price
+            side: LONG or SHORT
+            trailing_activation_pct: Profit % to activate trailing (default 4%)
+            trailing_distance_pct: Distance % from peak to trigger close (default 2%)
+            
+        Returns:
+            (should_close, reason)
+        """
+        if side == Side.LONG:
+            profit_pct = (current_price - entry_price) / entry_price
+            
+            # Track highest price for this position
+            if position_id not in self.position_peaks:
+                self.position_peaks[position_id] = entry_price
+            
+            highest_price = self.position_peaks[position_id]
+            
+            # Update highest price if current is higher
+            if current_price > highest_price:
+                highest_price = current_price
+                self.position_peaks[position_id] = highest_price
+                logger.info(
+                    "trailing_stop_peak_updated",
+                    position_id=position_id,
+                    new_peak=highest_price,
+                    profit_pct=f"{profit_pct*100:.2f}%"
+                )
+            
+            # Check if trailing stop should activate
+            if profit_pct > trailing_activation_pct:
+                drawdown_from_peak = (highest_price - current_price) / highest_price
+                
+                if drawdown_from_peak > trailing_distance_pct:
+                    # Clean up tracking
+                    del self.position_peaks[position_id]
+                    
+                    reason = f"TRAILING STOP: Giá giảm {drawdown_from_peak*100:.2f}% từ đỉnh ${highest_price:.2f}. Bảo vệ profit ${current_price - entry_price:.2f} (+{profit_pct*100:.2f}%)"
+                    logger.warning(
+                        "trailing_stop_triggered",
+                        position_id=position_id,
+                        entry=entry_price,
+                        peak=highest_price,
+                        current=current_price,
+                        profit_protected=f"{profit_pct*100:.2f}%"
+                    )
+                    return True, reason
+        
+        else:  # SHORT
+            profit_pct = (entry_price - current_price) / entry_price
+            
+            # Track lowest price for SHORT
+            if position_id not in self.position_peaks:
+                self.position_peaks[position_id] = entry_price
+            
+            lowest_price = self.position_peaks[position_id]
+            
+            if current_price < lowest_price:
+                lowest_price = current_price
+                self.position_peaks[position_id] = lowest_price
+                logger.info(
+                    "trailing_stop_peak_updated_short",
+                    position_id=position_id,
+                    new_low=lowest_price,
+                    profit_pct=f"{profit_pct*100:.2f}%"
+                )
+            
+            if profit_pct > trailing_activation_pct:
+                drawup_from_low = (current_price - lowest_price) / lowest_price
+                
+                if drawup_from_low > trailing_distance_pct:
+                    del self.position_peaks[position_id]
+                    
+                    reason = f"TRAILING STOP: Giá tăng {drawup_from_low*100:.2f}% từ đáy ${lowest_price:.2f}. Bảo vệ profit ${entry_price - current_price:.2f} (+{profit_pct*100:.2f}%)"
+                    logger.warning(
+                        "trailing_stop_triggered_short",
+                        position_id=position_id,
+                        entry=entry_price,
+                        low=lowest_price,
+                        current=current_price,
+                        profit_protected=f"{profit_pct*100:.2f}%"
+                    )
+                    return True, reason
+        
+        return False, ""
 
     async def decide(self, snapshot: MarketSnapshot) -> Decision:
         """
@@ -70,13 +206,32 @@ class TraderStub:
             side = random.choice([Side.LONG, Side.SHORT])
             entry_price = snapshot.close
             
-            # Calculate SL/TP based on side
-            if side == Side.LONG:
-                stop_loss = entry_price * 0.98  # 2% below
-                take_profit = entry_price * 1.04  # 4% above
-            else:
-                stop_loss = entry_price * 1.02  # 2% above
-                take_profit = entry_price * 0.96  # 4% below
+            # CRITICAL: Generate size within STRICT limit
+            # Size = 30% to 100% of max_position_pct (safety margin)
+            min_size = self.max_position_pct * 0.3
+            max_size = self.max_position_pct * 0.95  # Stay 5% below limit
+            size_pct = random.uniform(min_size, max_size)
+            
+            # Validation: MUST NOT EXCEED MAX (hard constraint)
+            if size_pct > self.max_position_pct:
+                logger.error(
+                    "CRITICAL_SIZE_VALIDATION_FAILED",
+                    generated_size=size_pct,
+                    max_allowed=self.max_position_pct,
+                    status="THIS_SHOULD_NEVER_HAPPEN"
+                )
+                size_pct = self.max_position_pct * 0.9  # Force to safe level
+            
+            logger.debug(
+                "position_size_generated",
+                size_pct=f"{size_pct*100:.1f}%",
+                max_limit=f"{self.max_position_pct*100:.1f}%",
+                buffer_remaining=f"{(self.max_position_pct - size_pct)*100:.1f}%"
+            )
+            
+            # Use dynamic SL/TP calculation with randomization (anti-bot)
+            volatility = abs(snapshot.volume) / 1000000 if snapshot.volume else 0.02
+            stop_loss, take_profit = self.calculate_dynamic_targets(entry_price, side, volatility)
 
             confidence_val = random.uniform(0.65, 0.85)
             action_desc = "Vào lệnh (Open)" if action == ActionType.OPEN else "Đóng vị thế (Close)"
@@ -98,7 +253,7 @@ class TraderStub:
                 side=side,
                 entry_type=OrderType.MARKET,
                 entry_price=entry_price if action == ActionType.OPEN else None,
-                size_pct=random.uniform(0.05, 0.15),  # 5-15% of balance
+                size_pct=size_pct,  # ✅ Uses validated size from above
                 leverage=random.randint(2, 5),  # 2-5x leverage
                 stop_loss=stop_loss if action == ActionType.OPEN else None,
                 take_profit=take_profit if action == ActionType.OPEN else None,

@@ -29,10 +29,12 @@ class TelegramBotWorker:
         """Run the telegram bot worker"""
         logger.info("telegram_worker_starting")
         
-        # Register signal handlers
-        loop = asyncio.get_event_loop()
-        loop.add_signal_handler(signal.SIGTERM, self._signal_handler, signal.SIGTERM, None)
-        loop.add_signal_handler(signal.SIGINT, self._signal_handler, signal.SIGINT, None)
+        # Register signal handlers if supported (not supported on Windows)
+        import sys
+        if sys.platform != "win32":
+            loop = asyncio.get_event_loop()
+            loop.add_signal_handler(signal.SIGTERM, self._signal_handler, signal.SIGTERM, None)
+            loop.add_signal_handler(signal.SIGINT, self._signal_handler, signal.SIGINT, None)
         
         try:
             # Initialize and start bot

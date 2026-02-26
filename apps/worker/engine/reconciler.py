@@ -331,33 +331,40 @@ class ReconcilerEngine:
             # Get exchange positions
             exchange_positions = await self._get_exchange_positions()
             
-            # Update DB from exchange
-            for ex_pos in exchange_positions:
-                result = await session.execute(
-                    select(PositionModel).where(
-                        PositionModel.symbol == ex_pos["symbol"]
-                    )
-                )
-                db_pos = result.scalar_one_or_none()
-                
-                if db_pos:
-                    # Update existing position
+            # Map symbol to exchange position
+            ex_symbols = {p["symbol"]: p for p in exchange_positions}
+
+            # Fetch existing positions from DB
+            result = await session.execute(select(PositionModel))
+            db_positions = result.scalars().all()
+            
+            # Update or delete existing DB positions
+            for db_pos in db_positions:
+                if db_pos.symbol in ex_symbols:
+                    # Sync with exchange
+                    ex_pos = ex_symbols[db_pos.symbol]
                     db_pos.qty = abs(ex_pos["qty"])
                     db_pos.entry_price = ex_pos["entry_price"]
                     db_pos.leverage = ex_pos["leverage"]
                     db_pos.liquidation_price = ex_pos["liquidation_price"]
                     db_pos.updated_at = datetime.utcnow()
+                    # Remove from map so we only add purely new ones below
+                    del ex_symbols[db_pos.symbol]
                 else:
-                    # Create new position (shouldn't happen normally)
-                    db_pos = PositionModel(
-                        symbol=ex_pos["symbol"],
-                        side="LONG" if ex_pos["qty"] > 0 else "SHORT",
-                        qty=abs(ex_pos["qty"]),
-                        entry_price=ex_pos["entry_price"],
-                        leverage=ex_pos["leverage"],
-                        liquidation_price=ex_pos["liquidation_price"],
-                    )
-                    session.add(db_pos)
+                    # Position is closed on exchange, remove from DB
+                    await session.delete(db_pos)
+
+            # Add missing positions that exist on exchange but not in DB
+            for sym, ex_pos in ex_symbols.items():
+                new_pos = PositionModel(
+                    symbol=sym,
+                    side="LONG" if ex_pos["qty"] > 0 else "SHORT",
+                    qty=abs(ex_pos["qty"]),
+                    entry_price=ex_pos["entry_price"],
+                    leverage=ex_pos["leverage"],
+                    liquidation_price=ex_pos["liquidation_price"],
+                )
+                session.add(new_pos)
             
             await session.commit()
             logger.info("positions_synced_from_exchange")

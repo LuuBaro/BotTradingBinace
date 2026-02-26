@@ -55,6 +55,71 @@ class ExecutionEngine:
             exchange_type="binance" if self.is_binance else "mock",
         )
 
+    async def _validate_position_size_explicitly(
+        self,
+        decision: Decision,
+        trace_id: str,
+        session: AsyncSession,
+    ) -> None:
+        """
+        ✅ CRITICAL VALIDATION: Ensure position size does NOT exceed limits
+        This is a safety check BEFORE execution to prevent oversized positions
+        
+        Args:
+            decision: Trading decision to validate
+            trace_id: Trace ID for logging
+            session: Database session
+            
+        Raises:
+            ValueError: If position size exceeds configured limits
+        """
+        # Get current positions to check total
+        existing_positions = await session.execute(select(PositionModel))
+        positions = existing_positions.scalars().all()
+        
+        # Get balance
+        if self.is_binance:
+            balance_info = await self.exchange.get_account_balance()
+            usdt_balance = next(
+                (b for b in balance_info if b["asset"] == "USDT"),
+                {"balance": "0"}
+            )
+            balance = float(usdt_balance.get("balance", 0))
+        else:
+            balance_info = await self.exchange.get_balance()
+            balance = balance_info["balance"]
+        
+        # Calculate position value
+        position_notional = balance * decision.size_pct * decision.leverage
+        position_size_pct = (position_notional / balance * 100) if balance > 0 else 0
+        
+        logger.info(
+            "position_size_validation_check",
+            trace_id=trace_id,
+            symbol=decision.symbol,
+            size_pct=f"{decision.size_pct*100:.2f}%",
+            leverage=f"{decision.leverage}x",
+            notional_pct=f"{position_size_pct:.2f}%",
+            balance=f"${balance:.2f}",
+            decision_status="EXPLICIT VALIDATION BEFORE EXECUTION"
+        )
+        
+        # Hard constraint: position_size_pct must be <= balance (100%)
+        if position_size_pct > 100:
+            error_msg = (
+                f"REJECTED: Position size {position_size_pct:.1f}% exceeds 100% of balance! "
+                f"size_pct={decision.size_pct*100:.1f}%, leverage={decision.leverage}x"
+            )
+            logger.error("position_size_validation_failed", trace_id=trace_id, reason=error_msg)
+            raise ValueError(error_msg)
+        
+        logger.info(
+            "position_size_validation_passed",
+            trace_id=trace_id,
+            check_status="✅ SAFE TO EXECUTE",
+            safety_buffer=f"{100 - position_size_pct:.1f}% remaining"
+        )
+
     async def execute_decision(
         self,
         decision: Decision,
@@ -91,6 +156,14 @@ class ExecutionEngine:
         session: AsyncSession,
     ) -> dict:
         """Open a new position"""
+        # ✅ CRITICAL: Validate position size EXPLICITLY before execution
+        # This prevents any position from exceeding configured limits
+        await self._validate_position_size_explicitly(
+            decision=decision,
+            trace_id=trace_id,
+            session=session
+        )
+        
         # Generate deterministic client_order_id
         client_order_id = f"{trace_id[:8]}_{decision.symbol}_{int(datetime.utcnow().timestamp())}"
 

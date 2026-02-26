@@ -32,6 +32,9 @@ export const OrdersPage: React.FC = () => {
 
   const filteredOrders = orders.filter((o) => {
     if (filter === 'all') return true
+    if (filter === 'open') return ['NEW', 'PARTIALLY_FILLED'].includes(o.status.toUpperCase())
+    if (filter === 'cancelled') return o.status.toUpperCase() === 'CANCELLED'
+    if (filter === 'filled') return o.status.toUpperCase() === 'FILLED'
     return o.status.toLowerCase() === filter.toLowerCase()
   })
 

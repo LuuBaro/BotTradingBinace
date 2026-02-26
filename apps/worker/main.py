@@ -25,7 +25,7 @@ from packages.shared.risk_engine import RiskEngine
 from packages.shared.logger import logger
 from apps.worker.agents.trader_stub import TraderStub
 from apps.worker.engine.execution import ExecutionEngine
-
+from apps.worker.engine.reconciler import ReconcilerEngine
 
 class TradingWorker:
     """
@@ -51,6 +51,7 @@ class TradingWorker:
         
         self.trader = TraderStub()
         self.execution_engine = ExecutionEngine(self.exchange)
+        self.reconciler = ReconcilerEngine(self.exchange)
         self.risk_engine: RiskEngine | None = None
         self.loop_count = 0
         self.binance_session = None  # For Binance async client
@@ -89,6 +90,15 @@ class TradingWorker:
         # Initialize risk engine
         self.risk_engine = RiskEngine(risk_config)
         
+        # ✅ CRITICAL: Initialize trader with max_position_pct limit
+        # This ensures AI never generates size > config limit
+        self.trader = TraderStub(max_position_pct=risk_config.max_position_pct)
+        logger.info(
+            "trader_stub_initialized_with_limit",
+            max_position_pct=f"{risk_config.max_position_pct*100:.1f}%",
+            context="AI will generate sizes within [30%, 95%] of max to maintain safety margin"
+        )
+        
         logger.info("worker_initialized")
 
     async def run(self) -> None:
@@ -116,6 +126,9 @@ class TradingWorker:
 
         async with AsyncSessionFactory() as session:
             try:
+                # Reconcile exchange positions with database
+                await self.reconciler.sync_positions(session)
+
                 # Step 1: Get market snapshot (real from Binance or mock)
                 if self.is_binance:
                     snapshot = await self._fetch_binance_snapshot()
@@ -145,13 +158,19 @@ class TradingWorker:
                 session.add(decision_record)
                 await session.flush()
 
+                try:
+                    rationale_text = decision.rationale[:50] + "..." if len(decision.rationale) > 50 else decision.rationale
+                    rationale_text = rationale_text.encode('ascii', errors='ignore').decode('ascii')
+                except Exception:
+                    rationale_text = "See detailed rationale in database."
+
                 logger.info(
                     "decision_made",
                     trace_id=trace_id,
                     action=decision.action.value,
                     regime=decision.regime.value,
                     confidence=decision.confidence,
-                    rationale=decision.rationale[:50] + "..." if len(decision.rationale) > 50 else decision.rationale
+                    rationale=rationale_text
                 )
                 
                 # Step 3b: AI Intelligence Analysis & Watchlist

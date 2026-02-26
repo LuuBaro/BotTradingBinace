@@ -15,6 +15,9 @@ export const OverviewPage: React.FC = () => {
   const [latestDecision, setLatestDecision] = useState<any>(null)
   const [pnlHistory, setPnlHistory] = useState<any[]>([])
   const [timeRange, setTimeRange] = useState<'1H' | '4H' | '1D' | '1W'>('1D')
+  const [healthStatus, setHealthStatus] = useState<any>(null)
+  const [pnlBreakdown, setPnlBreakdown] = useState({ realized: 0, unrealized: 0 })
+  const [hoveredCardIndex, setHoveredCardIndex] = useState<number | null>(null)
 
   // Memoized API client
   const token = localStorage.getItem('token') || ''
@@ -24,12 +27,14 @@ export const OverviewPage: React.FC = () => {
     const fetchData = async () => {
       try {
         const days = timeRange === '1W' ? 7 : 1
-        const [status, posResponse, ordResponse, decisionsResponse, historyData] = await Promise.all([
+        const [status, posResponse, ordResponse, decisionsResponse, historyData, latencyData, healthData] = await Promise.all([
           api.getBotStatus(),
           api.getPositions(),
           api.getOrders(),
           api.getDecisions(10),
-          api.getPnlHistory(days)
+          api.getPnlHistory(days),
+          api.getLatencyMetrics().catch(() => null),
+          api.getHealthStatus().catch(() => null)
         ])
 
         const currentPositions = Array.isArray(posResponse) ? posResponse : []
@@ -45,6 +50,7 @@ export const OverviewPage: React.FC = () => {
         const realizedPnL = status.realized_pnl_today || 0
         const currentTotalPnL = realizedPnL + unrealizedPnL
         setPnlToday(currentTotalPnL)
+        setPnlBreakdown({ realized: realizedPnL, unrealized: unrealizedPnL })
 
         if (Array.isArray(historyData) && historyData.length > 0) {
           // Filter historyData based on timeRange if needed
@@ -89,11 +95,14 @@ export const OverviewPage: React.FC = () => {
           setLatestDecision(allDecisions[0])
         }
 
-        const latencyData = await api.getLatencyMetrics()
-        setLatency(latencyData)
-
-        const healthData = await api.getHealthStatus()
-        setHealth(healthData)
+        if (latencyData) {
+          setLatency(latencyData)
+        }
+        
+        if (healthData) {
+          setHealth(healthData)
+          setHealthStatus(healthData)
+        }
 
         setBotStatus({
           mode: status.mode || 'Demo',
@@ -153,14 +162,19 @@ export const OverviewPage: React.FC = () => {
       </div>
 
       {/* 3D-like Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 overflow-visible">
         {[
           { label: 'Môi trường (Risk Mode)', value: botStatus?.mode || 'Demo', sub: botStatus?.paused ? 'SYSTEM PAUSED' : 'LIVE TRADING', color: 'text-blue-400', icon: <Server size={14} />, gradient: 'from-blue-500/10' },
           { label: 'Thời gian hoạt động', value: `${uptimeHours}h ${uptimeMinutes}m`, sub: `${positions.length} Vị thế đang mở`, color: 'text-purple-400', icon: <Clock size={14} />, gradient: 'from-purple-500/10' },
-          { label: 'Tổng Alpha (PnL)', value: `$${pnlToday.toFixed(2)}`, sub: `${orders.length} Lệnh đã xử lý`, color: pnlToday >= 0 ? 'text-emerald-400' : 'text-rose-400', icon: <TrendingUp size={14} />, gradient: pnlToday >= 0 ? 'from-emerald-500/10' : 'from-rose-500/10' },
+          { label: 'Tổng Alpha (PnL)', value: `$${pnlToday.toFixed(2)}`, sub: `${orders.length} Lệnh đã xử lý`, color: pnlToday >= 0 ? 'text-emerald-400' : 'text-rose-400', icon: <TrendingUp size={14} />, gradient: pnlToday >= 0 ? 'from-emerald-500/10' : 'from-rose-500/10', tooltip: true },
           { label: 'Sự kiện hệ thống', value: `${events.length}`, sub: 'Dữ liệu telemetry đang hoạt động', color: 'text-amber-400', icon: <Database size={14} />, gradient: 'from-amber-500/10' },
         ].map((stat, i) => (
-          <div key={i} className={`relative group card bg-gradient-to-br ${stat.gradient} to-transparent border-white/5 p-6 hover:scale-[1.02]`}>
+          <div 
+            key={i} 
+            className={`relative card ${stat.tooltip ? 'overflow-visible' : ''} bg-gradient-to-br ${stat.gradient} to-transparent border-white/5 p-6 hover:scale-[1.02] transition-all`}
+            onMouseEnter={() => stat.tooltip && setHoveredCardIndex(i)}
+            onMouseLeave={() => setHoveredCardIndex(null)}
+          >
             <div className="flex items-center gap-2 mb-4">
               <div className="p-1.5 bg-white/5 rounded-lg text-slate-400 group-hover:text-white transition-colors">
                 {stat.icon}
@@ -169,6 +183,118 @@ export const OverviewPage: React.FC = () => {
             </div>
             <div className={`text-4xl font-black ${stat.color} tracking-tighter mb-1`}>{stat.value}</div>
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{stat.sub}</div>
+            
+            {/* PnL Tooltip - Improved Design with Backdrop */}
+            {stat.tooltip && hoveredCardIndex === i && (
+              <>
+                {/* Backdrop Overlay - Maximum Coverage */}
+                <div 
+                  className="fixed inset-0 bg-black/85 animate-fadeIn pointer-events-auto"
+                  onClick={() => setHoveredCardIndex(null)}
+                  style={{ 
+                    animation: 'fadeIn 0.3s ease-out',
+                    zIndex: 999998,
+                    backdropFilter: 'blur(8px)',
+                    WebkitBackdropFilter: 'blur(8px)'
+                  }}
+                />
+                
+                {/* Tooltip Content */}
+                <div 
+                  className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 transition-all duration-500 bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/40 border-2 border-emerald-500/30 rounded-2xl p-6 shadow-2xl w-80 opacity-100 scale-100 backdrop-blur-xl pointer-events-auto" 
+                  style={{
+                    boxShadow: '0 25px 80px rgba(16, 185, 129, 0.4), inset 0 1px 1px rgba(255,255,255,0.1)',
+                    zIndex: 999999
+                  }}
+                >
+                {/* Close button */}
+                <button 
+                  onClick={(e) => { e.stopPropagation(); setHoveredCardIndex(null); }}
+                  className="absolute top-3 right-3 w-6 h-6 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-slate-400 hover:text-white transition-all"
+                >
+                  ✕
+                </button>
+                
+                <div className="space-y-4">
+                  {/* Header */}
+                  <div className="pb-3 border-b border-emerald-500/20">
+                    <div className="flex items-center gap-3 mb-2">
+                      <div className="w-10 h-10 bg-emerald-500/10 rounded-xl flex items-center justify-center border border-emerald-500/30">
+                        <TrendingUp className="text-emerald-400" size={20} />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-black uppercase tracking-wider text-emerald-300">Chi Tiết P&L</h3>
+                        <p className="text-[9px] text-slate-400 uppercase tracking-wide">Profit & Loss Breakdown</p>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {/* Breakdown Cards */}
+                  <div className="space-y-3">
+                    {/* Realized PnL */}
+                    <div className="bg-gradient-to-br from-slate-800/80 to-emerald-950/40 rounded-xl p-4 border border-emerald-500/20 hover:border-emerald-500/40 transition-all group">
+                      <div className="flex justify-between items-center">
+                        <div className="space-y-1">
+                          <div className="text-[10px] text-slate-400 uppercase tracking-wide font-semibold">Realized</div>
+                          <div className="text-[9px] text-emerald-300/60">Đã Đóng Lệnh</div>
+                        </div>
+                        <div className="text-right">
+                          <div className={`text-xl font-black font-mono ${pnlBreakdown.realized >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {pnlBreakdown.realized >= 0 ? '+' : ''}${pnlBreakdown.realized.toFixed(2)}
+                          </div>
+                          <div className="text-[8px] text-slate-500 mt-0.5">từ lệnh đã chốt</div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {/* Unrealized PnL */}
+                    <div className="bg-gradient-to-br from-slate-800/80 to-blue-950/40 rounded-xl p-4 border border-blue-500/20 hover:border-blue-500/40 transition-all">
+                      <div className="flex justify-between items-center">
+                        <div className="space-y-1">
+                          <div className="text-[10px] text-slate-400 uppercase tracking-wide font-semibold">Unrealized</div>
+                          <div className="text-[9px] text-blue-300/60">Đang Mở</div>
+                        </div>
+                        <div className="text-right">
+                          <div className={`text-xl font-black font-mono ${pnlBreakdown.unrealized >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {pnlBreakdown.unrealized >= 0 ? '+' : ''}${pnlBreakdown.unrealized.toFixed(2)}
+                          </div>
+                          <div className="text-[8px] text-slate-500 mt-0.5">từ vị thế hiện tại</div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {/* Total */}
+                    <div className="bg-gradient-to-br from-emerald-950/60 to-slate-900 rounded-xl p-5 border-2 border-emerald-500/40 relative overflow-hidden">
+                      <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/5 to-transparent"></div>
+                      <div className="relative flex justify-between items-center">
+                        <div>
+                          <div className="text-[11px] font-black text-white uppercase tracking-widest">Tổng Cộng</div>
+                          <div className="text-[8px] text-emerald-300/60 mt-0.5">Total P&L Today</div>
+                        </div>
+                        <div className="text-right">
+                          <div className={`text-2xl font-black font-mono ${pnlToday >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {pnlToday >= 0 ? '+' : ''}${pnlToday.toFixed(2)}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {/* Footer Note */}
+                  <div className="flex items-start gap-2 px-3 py-2.5 bg-slate-800/40 rounded-lg border border-slate-700/50">
+                    <span className="text-emerald-400 text-xs mt-0.5">ℹ️</span>
+                    <p className="text-[9px] text-slate-300 leading-relaxed">
+                      <span className="font-semibold text-emerald-300">Realized</span> = Lệnh đã chốt | <span className="font-semibold text-blue-300">Unrealized</span> = Đang chạy
+                    </p>
+                  </div>
+                </div>
+                
+                {/* Animated glow effect */}
+                <div className="absolute inset-0 rounded-2xl bg-gradient-to-r from-emerald-500/0 via-emerald-500/5 to-emerald-500/0 animate-pulse pointer-events-none"></div>
+              </div>
+              </>
+            )}
+            
             <div className={`absolute bottom-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity`}>
               {stat.icon && React.cloneElement(stat.icon as React.ReactElement, { size: 60 })}
             </div>
@@ -179,7 +305,7 @@ export const OverviewPage: React.FC = () => {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
         {/* Main Neural Performance Chart */}
         <div className="lg:col-span-12 xl:col-span-8 card glass-dark border-white/5 p-8 relative overflow-hidden group">
-          <div className="relative z-10 space-y-8">
+          <div className="relative z-1 space-y-8">
             <div className="flex justify-between items-center">
               <h2 className="text-2xl font-black tracking-tight flex items-center gap-3">
                 <Activity className="text-blue-400" size={24} />
@@ -228,7 +354,7 @@ export const OverviewPage: React.FC = () => {
         <div className="lg:col-span-12 xl:col-span-4 space-y-8">
           {/* Latest Decision Card */}
           <div className="card border-blue-500/20 bg-gradient-to-br from-slate-950 to-blue-950/30 overflow-hidden relative group">
-            <div className="p-8 space-y-6 relative z-10">
+            <div className="p-8 space-y-6 relative z-1">
               <div className="flex items-center gap-3">
                 <div className="w-12 h-12 bg-blue-500/10 rounded-2xl flex items-center justify-center border border-blue-500/20 group-hover:bg-blue-500/20 transition-all">
                   <Brain className="text-blue-400" size={24} />
@@ -290,21 +416,41 @@ export const OverviewPage: React.FC = () => {
                 Cơ sở hạ tầng Node (Infrastructure)
               </h3>
               <div className="space-y-4">
-                {[
-                  { label: 'Market Streams', status: 'Optimal', color: 'text-emerald-400' },
-                  { label: 'Risk Validator', status: 'Operational', color: 'text-emerald-400' },
-                  { label: 'Binance API', status: 'High Performance', color: 'text-emerald-400' },
-                  { label: 'Internal DB', status: 'Synced', color: 'text-emerald-400' }
-                ].map((svc, i) => (
-                  <div key={i} className="flex justify-between items-center group cursor-default">
-                    <span className="text-xs font-bold text-slate-400 group-hover:text-slate-200 transition-colors">{svc.label}</span>
-                    <div className="flex items-center gap-2">
-                      <span className={`text-[10px] font-black uppercase tracking-tighter ${svc.color}`}>{svc.status}</span>
-                      <div className={`w-1 h-1 rounded-full bg-emerald-500 animate-glow`}></div>
+                {(healthStatus?.services || [
+                  { name: 'market_streams', status: 'checking', label: 'Market Streams' },
+                  { name: 'risk_validator', status: 'checking', label: 'Risk Validator' },
+                  { name: 'binance_api', status: 'checking', label: 'Binance API' },
+                  { name: 'database', status: 'checking', label: 'Internal DB' }
+                ]).map((svc: any, i: number) => {
+                  const label = svc.label || (svc.name === 'market_streams' ? 'Market Streams' : 
+                                svc.name === 'risk_validator' ? 'Risk Validator' :
+                                svc.name === 'binance_api' ? 'Binance API' : 'Internal DB')
+                  const statusText = svc.status === 'healthy' ? 'Optimal' : 
+                                    svc.status === 'operational' ? 'Operational' :
+                                    svc.status === 'degraded' ? 'Degraded' :
+                                    svc.status === 'offline' ? 'Offline' : 'Checking...'
+                  const statusColor = svc.status === 'healthy' ? 'text-emerald-400' :
+                                     svc.status === 'operational' ? 'text-emerald-400' :
+                                     svc.status === 'degraded' ? 'text-amber-400' : 'text-rose-400'
+                  const glowColor = svc.status === 'healthy' || svc.status === 'operational' ? 'bg-emerald-500' :
+                                   svc.status === 'degraded' ? 'bg-amber-500' : 'bg-rose-500'
+                  
+                  return (
+                    <div key={i} className="flex justify-between items-center group cursor-default">
+                      <span className="text-xs font-bold text-slate-400 group-hover:text-slate-200 transition-colors">{label}</span>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[10px] font-black uppercase tracking-tighter ${statusColor}`}>{statusText}</span>
+                        <div className={`w-1 h-1 rounded-full ${glowColor} ${svc.status === 'healthy' || svc.status === 'operational' ? 'animate-glow' : ''}`}></div>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
+              {!healthStatus && (
+                <div className="text-[10px] text-slate-500 italic">
+                  Đang tải trạng thái hệ thống...
+                </div>
+              )}
             </div>
           </div>
         </div>
