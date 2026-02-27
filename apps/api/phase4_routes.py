@@ -13,6 +13,7 @@ from dotenv import set_key
 from datetime import datetime, timedelta
 import httpx
 import uuid
+import json
 
 from packages.shared.database import AsyncSessionFactory
 from packages.shared.logger import logger
@@ -39,7 +40,7 @@ class LoginRequest(BaseModel):
     password: str
 
 
-router = APIRouter(prefix="/api", tags=["dashboard"])
+router = APIRouter(tags=["dashboard"])
 security = HTTPBearer()
 
 ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
@@ -125,9 +126,22 @@ async def login(request: LoginRequest):
             },
         }
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
         import traceback
         exc_str = traceback.format_exc()
         return {"error": str(e), "traceback": exc_str}
+
+
+@router.get("/system/status")
+async def get_system_status(credentials: Any = Depends(security)):
+    """Get system exchange connectivity status"""
+    return {
+        "exchange": "Binance" if settings.binance_api_key else "Mock",
+        "env": "Testnet" if settings.binance_testnet else "Mainnet",
+        "is_live": not settings.binance_testnet,
+        "is_demo": settings.is_demo
+    }
 
 
 @router.post("/auth/logout")
@@ -207,6 +221,10 @@ async def get_bot_status(credentials: Any = Depends(security)):
         )
         realized_pnl = float(pnl_result.scalar() or 0.0)
 
+        # Calculate all-time realized PnL
+        total_pnl_result = await db.execute(select(func.sum(TradeJournal.pnl)))
+        realized_pnl_total = float(total_pnl_result.scalar() or 0.0)
+
         # Determine mode
         mode = "Live" if (settings.binance_api_key and settings.binance_api_secret) else "Demo"
 
@@ -225,6 +243,7 @@ async def get_bot_status(credentials: Any = Depends(security)):
             "total_positions": positions_count,
             "total_orders": orders_count,
             "realized_pnl_today": realized_pnl,
+            "realized_pnl_total": realized_pnl_total,
         }
 
 
@@ -328,7 +347,6 @@ async def get_health_status(credentials: Any = Depends(security)):
             )
             recent = recent_positions.scalars().first()
             if recent:
-                from datetime import datetime, timedelta
                 time_since_update = datetime.utcnow() - recent.updated_at
                 if time_since_update < timedelta(minutes=5):
                     service_statuses['market_streams'] = {
@@ -413,19 +431,18 @@ async def get_risk_config(credentials: Any = Depends(security)):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     async with AsyncSessionFactory() as session:
-        manager = ConfigVersionManager(session)
-        config = await manager.get_current_config("risk")
-
-        if not config:
-            # Return default config
-            config = {
-                "max_leverage": 10,
-                "max_position_size": 1.0,
-                "max_daily_loss": 1000.0,
-                "min_win_rate": 0.55,
-            }
-
-        return config
+        # Get active bot config to align with what worker actually uses
+        result = await session.execute(
+            select(BotConfig).where(BotConfig.is_active == True).order_by(BotConfig.id.desc())
+        )
+        bot_config = result.scalar_one_or_none()
+        
+        if bot_config and bot_config.risk_json:
+            return bot_config.risk_json
+            
+        # Fallback to RiskConfig defaults if no active bot_config
+        from packages.shared.schemas import RiskConfig
+        return RiskConfig().model_dump()
 
 
 @router.post("/config/risk")
@@ -433,23 +450,55 @@ async def update_risk_config(
     config: dict,
     credentials: Any = Depends(security),
 ):
-    """Update risk configuration (creates new version)"""
+    """Update risk configuration (creates new version & updates worker config)"""
     user = jwt_handler.verify_token(credentials.credentials)
     if not user or user.role != "admin":
         raise HTTPException(status_code=403, detail="Forbidden")
 
     logger.info("update_risk_config", user=user.username, config=config)
 
+    from packages.shared.schemas import RiskConfig
+    try:
+        # Validate through Pydantic model
+        validated_config = RiskConfig(**config).model_dump()
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Invalid config: {e}")
+
     async with AsyncSessionFactory() as session:
+        # Update active BotConfig so worker correctly picks it up
+        result = await session.execute(
+            select(BotConfig).where(BotConfig.is_active == True).order_by(BotConfig.id.desc())
+        )
+        bot_config = result.scalar_one_or_none()
+        
+        if bot_config:
+            bot_config.risk_json = validated_config
+            session.add(bot_config)
+        else:
+            # Create a new BotConfig if none exists
+            bot_config = BotConfig(
+                env="live",
+                symbols_json=["BTCUSDT"],
+                risk_json=validated_config,
+                execution_json={},
+                version=1,
+                is_active=True
+            )
+            session.add(bot_config)
+            
+        # Also create history version for UI rollback
         manager = ConfigVersionManager(session)
         version = await manager.create_version(
             config_type="risk",
-            config=config,
+            config=validated_config,
             created_by=user.username,
             description=f"Updated by {user.username}",
         )
-        logger.info("risk_config_saved", version_id=version.id, config=config)
-        return config
+        
+        await session.commit()
+        
+        logger.info("risk_config_saved_and_applied", version_id=version.id, config=validated_config)
+        return validated_config
 
 
 @router.get("/config/risk/versions")
@@ -478,12 +527,23 @@ async def rollback_config(
 
     async with AsyncSessionFactory() as session:
         manager = ConfigVersionManager(session)
-        version = await manager.rollback_to_version(version_id, user.username)
+        try:
+            new_version = await manager.rollback_to_version(version_id, user.username)
+            
+            # Apply rollback to active worker config as well
+            result = await session.execute(
+                select(BotConfig).where(BotConfig.is_active == True).order_by(BotConfig.id.desc())
+            )
+            bot_config = result.scalar_one_or_none()
+            if bot_config:
+                bot_config.risk_json = new_version.config_json
+                session.add(bot_config)
+                await session.commit()
+                
+            return new_version.config_json
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
 
-        return version.config_json
-
-
-# ===== WebSocket Endpoint =====
 
 @router.websocket("/ws/stream")
 async def websocket_endpoint(websocket: WebSocket, token: str = None):
@@ -613,6 +673,9 @@ async def get_positions_live(credentials: Any = Depends(security)):
                 continue
             
             side_str = pos.get('positionSide', 'BOTH')  # LONG, SHORT, or BOTH
+            if side_str == 'BOTH':
+                side_str = 'LONG' if position_amt > 0 else 'SHORT'
+                
             mark_price = float(pos.get('markPrice', 0))
             
             # Safe conversion handling
@@ -632,7 +695,7 @@ async def get_positions_live(credentials: Any = Depends(security)):
             pos_data = {
                 "id": f"binance_{symbol}",
                 "symbol": symbol,
-                "side": side_str,  # LONG, SHORT, or BOTH
+                "side": side_str,  # Derived LONG/SHORT even in One-Way
                 "qty": abs(position_amt),  # Use positionAmt directly (always positive for qty)
                 "entry_price": float(pos.get('entryPrice', 0)) if pos.get('entryPrice') else 0.0,
                 "mark_price": mark_price,
@@ -682,7 +745,7 @@ async def get_positions_live(credentials: Any = Depends(security)):
 
 
 @router.get("/orders")
-async def get_orders(credentials: Any = Depends(security)):
+async def get_orders(limit: int = 100, credentials: Any = Depends(security)):
     """Get all orders"""
     user = jwt_handler.verify_token(credentials.credentials)
     if not user:
@@ -692,22 +755,44 @@ async def get_orders(credentials: Any = Depends(security)):
         if settings.binance_api_key and settings.binance_api_secret:
             from packages.shared.exchange.binance_futures import BinanceFuturesClient
             import aiohttp
+            import asyncio
             from datetime import datetime, timezone
+            
             client = BinanceFuturesClient()
             connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
             async with aiohttp.ClientSession(connector=connector) as session:
                 client.session = session
                 await client.sync_server_time()
-                binance_orders = await client.get_all_orders("BTCUSDT", limit=50)
                 
-                # Sort newest first
-                binance_orders.reverse()
+                # List of symbols to monitor (should ideally come from a shared config)
+                symbols = [
+                    "BTCUSDT", "ETHUSDT", "LINKUSDT", "XRPUSDT", 
+                    "DOTUSDT", "UNIUSDT", "DOGEUSDT", "SOLUSDT", 
+                    "ADAUSDT", "MATICUSDT", "AVAXUSDT"
+                ]
                 
-                return [
-                    {
+                # Fetch orders for all symbols in parallel
+                tasks = [client.get_all_orders(s, limit=limit) for s in symbols]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                all_binance_orders = []
+                for res in results:
+                    if isinstance(res, list):
+                        all_binance_orders.extend(res)
+                    elif isinstance(res, Exception):
+                        logger.error("fetching_orders_for_symbol_failed", error=str(res))
+                
+                # Convert to internal format
+                res_orders = []
+                for o in all_binance_orders:
+                    side_val = o.get("positionSide", o["side"])
+                    if side_val == "BOTH":
+                        side_val = o["side"]
+                    
+                    res_orders.append({
                         "id": str(o["orderId"]),
                         "symbol": o["symbol"],
-                        "side": o.get("positionSide", o["side"]),
+                        "side": side_val,
                         "order_type": o["type"],
                         "quantity": float(o["origQty"]),
                         "filled_qty": float(o["executedQty"]),
@@ -715,18 +800,22 @@ async def get_orders(credentials: Any = Depends(security)):
                         "avg_price": float(o["avgPrice"]),
                         "created_at": datetime.fromtimestamp(o["time"] / 1000, tz=timezone.utc).isoformat(),
                         "updated_at": datetime.fromtimestamp(o["updateTime"] / 1000, tz=timezone.utc).isoformat()
-                    }
-                    for o in binance_orders
-                ]
+                    })
+                
+                # Sort all merged orders by newest first
+                res_orders.sort(key=lambda x: x["created_at"], reverse=True)
+                
+                # Cap the total results
+                return res_orders[:limit]
     except Exception as e:
-        logger.error("failed_to_fetch_binance_orders", error=str(e), exc_info=True)
+        logger.error("failed_to_fetch_binance_multi_symbol_orders", error=str(e), exc_info=True)
         pass
 
     async with AsyncSessionFactory() as session:
         from sqlalchemy import select, desc
         from packages.shared.models import Order
 
-        result = await session.execute(select(Order).order_by(desc(Order.created_at)).limit(50))
+        result = await session.execute(select(Order).order_by(desc(Order.created_at)).limit(limit))
         orders = result.scalars().all()
 
         return [
@@ -745,6 +834,98 @@ async def get_orders(credentials: Any = Depends(security)):
             for o in orders
         ]
 
+
+
+@router.get("/trades")
+async def get_trades(limit: int = 100, credentials: Any = Depends(security)):
+    """Get all trade executions (fills) from Binance"""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        if settings.binance_api_key and settings.binance_api_secret:
+            from packages.shared.exchange.binance_futures import BinanceFuturesClient
+            import aiohttp
+            import asyncio
+            from datetime import datetime, timezone
+            
+            client = BinanceFuturesClient()
+            connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+            async with aiohttp.ClientSession(connector=connector) as session:
+                client.session = session
+                await client.sync_server_time()
+                
+                # Get active symbols from DB
+                from packages.shared.models import BotConfig
+                async with AsyncSessionFactory() as db_session:
+                    bot_res = await db_session.execute(select(BotConfig).where(BotConfig.is_active == True))
+                    bot_config = bot_res.scalar_one_or_none()
+                    db_symbols = []
+                    if bot_config and bot_config.symbols_json:
+                        if isinstance(bot_config.symbols_json, list):
+                            db_symbols = bot_config.symbols_json
+                        elif isinstance(bot_config.symbols_json, dict):
+                            db_symbols = bot_config.symbols_json.get("symbols", [])
+                        elif isinstance(bot_config.symbols_json, str):
+                            import json
+                            parsed = json.loads(bot_config.symbols_json)
+                            db_symbols = parsed if isinstance(parsed, list) else parsed.get("symbols", [])
+                base_symbols = [
+                    "BTCUSDT", "ETHUSDT", "LINKUSDT", "XRPUSDT", 
+                    "DOTUSDT", "UNIUSDT", "DOGEUSDT", "SOLUSDT", 
+                    "ADAUSDT", "MATICUSDT", "AVAXUSDT"
+                ]
+                symbols = list(set(base_symbols + db_symbols))
+                
+                logger.info(f"Fetching trades for {len(symbols)} symbols from Binance...")
+                
+                # Fetch trades for all symbols in parallel
+                tasks = [client.get_user_trades(s, limit=limit) for s in symbols]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                all_binance_trades = []
+                for i, res in enumerate(results):
+                    symbol = symbols[i]
+                    if isinstance(res, list):
+                        if res:
+                            logger.info(f"Fetched {len(res)} trades for {symbol}")
+                        all_binance_trades.extend(res)
+                    elif isinstance(res, Exception):
+                        logger.error(f"fetching_trades_for_symbol_{symbol}_failed", error=str(res))
+                
+                logger.info(f"Total trades aggregated: {len(all_binance_trades)}")
+                
+                # Sort by newest first (using numerical time first for accuracy)
+                all_binance_trades.sort(key=lambda x: x.get('time', 0), reverse=True)
+                
+                # Convert to internal format matching the UI needs
+                res_trades = []
+                for t in all_binance_trades[:limit]:
+                    try:
+                        res_trades.append({
+                            "id": str(t.get("id", "")),
+                            "order_id": str(t.get("orderId", "")),
+                            "symbol": t.get("symbol", ""),
+                            "side": t.get("side", ""),
+                            "price": float(t.get("price", 0)),
+                            "qty": float(t.get("qty", 0)),
+                            "realized_pnl": float(t.get("realizedPnl", 0)),
+                            "quote_qty": float(t.get("quoteQty", 0)),
+                            "commission": float(t.get("commission", 0)),
+                            "commission_asset": t.get("commissionAsset", "USDT"),
+                            "time": datetime.fromtimestamp(t.get("time", 0) / 1000, tz=timezone.utc).isoformat(),
+                            "role": "Maker" if t.get("maker") else "Taker"
+                        })
+                    except Exception as e:
+                        logger.error("trade_conversion_error", symbol=t.get('symbol'), error=str(e))
+                
+                return res_trades
+    except Exception as e:
+        logger.error("failed_to_fetch_binance_trades", error=str(e), exc_info=True)
+        pass
+
+    return []
 
 
 @router.get("/decisions")
@@ -1234,28 +1415,42 @@ async def close_position_manual(
     from packages.shared.enums import ActionType, MarketRegime, Side
     
     async with AsyncSessionFactory() as session:
-        # Determine exchange
-        if settings.binance_api_key and settings.binance_api_secret:
-            exchange = BinanceFuturesClient()
-        else:
-            exchange = MockExchange()
-            
-        execution_engine = ExecutionEngine(exchange)
-        trace_id = f"manual_close_{uuid.uuid4().hex[:8]}"
-        
-        # Create a mock decision for closing
-        decision = Decision(
-            symbol=symbol,
-            action=ActionType.CLOSE,
-            regime=MarketRegime.UNKNOWN, # Fallback
-            side=Side.LONG, # Side doesn't matter for close
-            confidence=1.0,
-            rationale=f"Manual close by {user.username}"
-        )
-        
         try:
-            result = await execution_engine.execute_decision(decision, trace_id, session)
-            return result
+            # Determine exchange
+            if settings.binance_api_key and settings.binance_api_secret:
+                async with BinanceFuturesClient() as exchange:
+                    execution_engine = ExecutionEngine(exchange)
+                    trace_id = f"manual_close_{uuid.uuid4().hex[:8]}"
+                    
+                    # Create a mock decision for closing
+                    decision = Decision(
+                        symbol=symbol,
+                        action=ActionType.CLOSE,
+                        regime=MarketRegime.UNKNOWN, # Fallback
+                        side=Side.LONG, # Side doesn't matter for close
+                        confidence=1.0,
+                        rationale=f"Manual close by {user.username}"
+                    )
+                    
+                    result = await execution_engine.execute_decision(decision, trace_id, session)
+                    return result
+            else:
+                exchange = MockExchange()
+                execution_engine = ExecutionEngine(exchange)
+                trace_id = f"manual_close_{uuid.uuid4().hex[:8]}"
+                
+                # Create a mock decision for closing
+                decision = Decision(
+                    symbol=symbol,
+                    action=ActionType.CLOSE,
+                    regime=MarketRegime.UNKNOWN, # Fallback
+                    side=Side.LONG, # Side doesn't matter for close
+                    confidence=1.0,
+                    rationale=f"Manual close by {user.username}"
+                )
+                
+                result = await execution_engine.execute_decision(decision, trace_id, session)
+                return result
         except Exception as e:
             logger.error("manual_close_failed", symbol=symbol, error=str(e))
             raise HTTPException(status_code=500, detail=str(e))
@@ -1285,30 +1480,43 @@ async def open_position_manual(
         raise HTTPException(status_code=400, detail="Symbol is required")
 
     async with AsyncSessionFactory() as session:
-        if settings.binance_api_key and settings.binance_api_secret:
-            exchange = BinanceFuturesClient()
-        else:
-            exchange = MockExchange()
-            
-        execution_engine = ExecutionEngine(exchange)
-        trace_id = f"manual_open_{uuid.uuid4().hex[:8]}"
-        
-        decision = Decision(
-            symbol=symbol,
-            action=ActionType.OPEN,
-            regime=MarketRegime.UNKNOWN,
-            side=Side.LONG if side_str == "LONG" else Side.SHORT,
-            confidence=1.0,
-            leverage=leverage,
-            size_pct=size_pct / 100.0, # Convert % to decimal
-            rationale=f"Manual trade by {user.username}"
-        )
-        
         try:
-            # For manual orders, we might want to bypass risk engine or not. 
-            # Here we just execute it directly via the engine.
-            result = await execution_engine.execute_decision(decision, trace_id, session)
-            return result
+            if settings.binance_api_key and settings.binance_api_secret:
+                async with BinanceFuturesClient() as exchange:
+                    execution_engine = ExecutionEngine(exchange)
+                    trace_id = f"manual_open_{uuid.uuid4().hex[:8]}"
+                    
+                    decision = Decision(
+                        symbol=symbol,
+                        action=ActionType.OPEN,
+                        regime=MarketRegime.UNKNOWN,
+                        side=Side.LONG if side_str == "LONG" else Side.SHORT,
+                        confidence=1.0,
+                        leverage=leverage,
+                        size_pct=size_pct / 100.0, # Convert % to decimal
+                        rationale=f"Manual trade by {user.username}"
+                    )
+                    
+                    result = await execution_engine.execute_decision(decision, trace_id, session)
+                    return result
+            else:
+                exchange = MockExchange()
+                execution_engine = ExecutionEngine(exchange)
+                trace_id = f"manual_open_{uuid.uuid4().hex[:8]}"
+                
+                decision = Decision(
+                    symbol=symbol,
+                    action=ActionType.OPEN,
+                    regime=MarketRegime.UNKNOWN,
+                    side=Side.LONG if side_str == "LONG" else Side.SHORT,
+                    confidence=1.0,
+                    leverage=leverage,
+                    size_pct=size_pct / 100.0, # Convert % to decimal
+                    rationale=f"Manual trade by {user.username}"
+                )
+                
+                result = await execution_engine.execute_decision(decision, trace_id, session)
+                return result
         except Exception as e:
             logger.error("manual_open_failed", symbol=symbol, error=str(e))
             raise HTTPException(status_code=500, detail=str(e))
@@ -1326,14 +1534,14 @@ async def get_wallet_balance(credentials: Any = Depends(security)):
     from datetime import datetime, timedelta
 
     async with AsyncSessionFactory() as session:
-        # Determine exchange
-        if settings.binance_api_key and settings.binance_api_secret:
-            exchange = BinanceFuturesClient()
-        else:
-            exchange = MockExchange()
-            
         try:
-            balance_data = await exchange.get_balance()
+            # Determine exchange
+            if settings.binance_api_key and settings.binance_api_secret:
+                async with BinanceFuturesClient() as exchange:
+                    balance_data = await exchange.get_balance()
+            else:
+                exchange = MockExchange()
+                balance_data = await exchange.get_balance()
             
             # Fetch 24h Realized PnL
             yesterday = datetime.utcnow() - timedelta(days=1)
@@ -1362,6 +1570,7 @@ async def get_wallet_balance(credentials: Any = Depends(security)):
             return {
                 "wallet_balance": balance_data["wallet_balance"],
                 "available_balance": balance_data["balance"],
+                "initial_balance": settings.initial_account_balance,
                 "unrealized_pnl": unrealized_pnl,
                 "realized_pnl_24h": realized_pnl_24h,
                 "pnl_24h": total_pnl_24h,

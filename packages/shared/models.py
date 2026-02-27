@@ -260,3 +260,14 @@ class LearningReport(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     analysis_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     recommendations_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class TraderContext(Base):
+    """Historical context imported from human traders"""
+
+    __tablename__ = "trader_contexts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    trader_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)

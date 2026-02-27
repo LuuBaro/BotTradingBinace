@@ -328,37 +328,52 @@ class ReconcilerEngine:
                 logger.debug("sync_positions_skipped_mock_exchange")
                 return
             
-            # Get exchange positions
+            # 1. Get exchange positions
             exchange_positions = await self._get_exchange_positions()
             
-            # Map symbol to exchange position
-            ex_symbols = {p["symbol"]: p for p in exchange_positions}
+            # 2. Map symbol+side to exchange position
+            ex_map = {}
+            for p in exchange_positions:
+                side = p["side"]
+                if side == "BOTH":
+                    side = "long" if p["qty"] > 0 else "short"
+                logger.debug(f"reconciler_map_ex_pos: {p['symbol']} {side} {p['qty']}")
+                ex_map[(p["symbol"], side.lower())] = p
 
-            # Fetch existing positions from DB
+            # 3. Fetch existing positions from DB
             result = await session.execute(select(PositionModel))
             db_positions = result.scalars().all()
             
-            # Update or delete existing DB positions
+            # 4. Update or delete existing DB positions
             for db_pos in db_positions:
-                if db_pos.symbol in ex_symbols:
-                    # Sync with exchange
-                    ex_pos = ex_symbols[db_pos.symbol]
+                key = (db_pos.symbol, db_pos.side.lower())
+                logger.debug(f"reconciler_checking_db_pos: {key}")
+                if key in ex_map:
+                    # Found match: Sync data
+                    ex_pos = ex_map[key]
                     db_pos.qty = abs(ex_pos["qty"])
                     db_pos.entry_price = ex_pos["entry_price"]
                     db_pos.leverage = ex_pos["leverage"]
                     db_pos.liquidation_price = ex_pos["liquidation_price"]
                     db_pos.updated_at = datetime.utcnow()
-                    # Remove from map so we only add purely new ones below
-                    del ex_symbols[db_pos.symbol]
+                    logger.debug(f"reconciler_updated_db_pos: {key}")
+                    # Remove from map so we only add purely new ones later
+                    del ex_map[key]
                 else:
-                    # Position is closed on exchange, remove from DB
+                    # Not on exchange: Delete from DB
+                    logger.debug(f"reconciler_deleting_stale_db_pos: {key}")
                     await session.delete(db_pos)
 
-            # Add missing positions that exist on exchange but not in DB
-            for sym, ex_pos in ex_symbols.items():
+            # 5. Flush deletions BEFORE adding new positions to avoid UNIQUE constraint issues
+            # (especially if a symbol is changing from LONG to SHORT in One-Way mode)
+            await session.flush()
+
+            # 6. Add missing positions that exist on exchange but not in DB
+            for (sym, side), ex_pos in ex_map.items():
+                logger.debug(f"reconciler_adding_new_db_pos: {sym} {side}")
                 new_pos = PositionModel(
                     symbol=sym,
-                    side="LONG" if ex_pos["qty"] > 0 else "SHORT",
+                    side=side.upper(),
                     qty=abs(ex_pos["qty"]),
                     entry_price=ex_pos["entry_price"],
                     leverage=ex_pos["leverage"],

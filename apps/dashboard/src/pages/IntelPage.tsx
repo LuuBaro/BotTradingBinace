@@ -2,7 +2,7 @@ import React, { useEffect, useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { createApiClient, getApiBaseUrl } from '../api/client'
 import { format } from 'date-fns'
-import { Brain, Shield, Zap, TrendingUp, AlertTriangle, Target, Search } from 'lucide-react'
+import { Brain, Shield, Zap, TrendingUp, TrendingDown, AlertTriangle, Target, Search, CheckCircle } from 'lucide-react'
 
 export const IntelPage: React.FC = () => {
     const navigate = useNavigate()
@@ -92,14 +92,14 @@ export const IntelPage: React.FC = () => {
         try {
             // Simulate AI optimization process
             await new Promise(resolve => setTimeout(resolve, 2000))
-            
+
             // Calculate improvements
-            const avgProbability = (signals.length > 0 
-                ? signals.reduce((sum: number, s: any) => sum + (s.probability || 0), 0) / signals.length 
+            const avgProbability = (signals.length > 0
+                ? signals.reduce((sum: number, s: any) => sum + (s.probability || 0), 0) / signals.length
                 : 0.5) * 100
-            
+
             const improvement = Math.random() * 15 + 5 // 5-20% improvement
-            
+
             setOptimizationResult({
                 completed: true,
                 timestamp: new Date(),
@@ -133,7 +133,7 @@ export const IntelPage: React.FC = () => {
                         </div>
                         <span className="text-xs font-bold text-blue-400 uppercase tracking-widest">Thông Tin Thị Trường</span>
                     </div>
-                    <h1 className="text-5xl font-black text-gradient">Danh Sách Xem Neural</h1>
+                    <h1 className="text-5xl font-black text-gradient">Neural Watchlist</h1>
                     <p className="text-slate-300 mt-1 text-sm">Quan Sát Thị Trường Được Hỗ Trợ Bởi AI</p>
                     <p className="text-slate-400 mt-2 max-w-xl">
                         Phân tích biểu đồ đặt hàng thời gian thực từ nhiều sàn giao dịch và cụm kỹ thuật.
@@ -207,7 +207,8 @@ export const IntelPage: React.FC = () => {
                                                     ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                                                     : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
                                                     }`}>
-                                                    {signal.side === 'LONG' ? '📈 MUA' : '📉 BÁN'}
+                                                    {signal.side === 'LONG' ? <TrendingUp size={12} className="inline mr-1" /> : <TrendingDown size={12} className="inline mr-1" />}
+                                                    {signal.side === 'LONG' ? 'MUA' : 'BÁN'}
                                                 </span>
                                             </div>
                                             <div className="bg-slate-950/40 p-3 rounded-xl border border-white/5">
@@ -237,7 +238,7 @@ export const IntelPage: React.FC = () => {
                                                     <span className="text-[6px] uppercase text-slate-500">Sanb</span>
                                                 </div>
                                             </div>
-                                            <button 
+                                            <button
                                                 onClick={() => setSelectedSignal(signal)}
                                                 className="text-[10px] font-bold text-blue-400 hover:text-white transition-colors">CHI TIẾT →</button>
                                         </div>
@@ -266,7 +267,7 @@ export const IntelPage: React.FC = () => {
                                         <span className="text-lg font-black font-mono text-blue-400">{marketMetrics.bullish_pressure}%</span>
                                     </div>
                                     <div className="h-2 bg-slate-950 rounded-full overflow-hidden flex">
-                                        <div className={`bg-gradient-to-r from-blue-600 to-blue-400 h-full shadow-[0_0_15px_rgba(59,130,246,0.4)]`} style={{width: `${marketMetrics.bullish_pressure}%`}}></div>
+                                        <div className={`bg-gradient-to-r from-blue-600 to-blue-400 h-full shadow-[0_0_15px_rgba(59,130,246,0.4)]`} style={{ width: `${marketMetrics.bullish_pressure}%` }}></div>
                                         <div className="flex-1 bg-slate-800 h-full"></div>
                                     </div>
                                 </div>
@@ -312,10 +313,10 @@ export const IntelPage: React.FC = () => {
                                 </p>
                             </div>
                             <div className="space-y-2 text-sm text-gray-400">
-                                <p>📊 Xu Hướng: {marketMetrics.trend}</p>
-                                <p>📈 Áp Lực Tăng Giá: {(marketMetrics.bullish_pressure).toFixed(0)}%</p>
+                                <p className="flex items-center justify-center gap-2"><TrendingUp size={14} className="text-blue-400" /> Xu Hướng: {marketMetrics.trend}</p>
+                                <p className="flex items-center justify-center gap-2"><Zap size={14} className="text-blue-400" /> Áp Lực Tăng Giá: {(marketMetrics.bullish_pressure).toFixed(0)}%</p>
                                 {optimizationResult?.completed && (
-                                    <p className="text-green-400 font-medium">✅ Cải Thiện Hiệu Năng: +{optimizationResult.improvement}%</p>
+                                    <p className="text-green-400 font-medium flex items-center justify-center gap-2"><CheckCircle size={14} /> Cải Thiện Hiệu Năng: +{optimizationResult.improvement}%</p>
                                 )}
                             </div>
                             <div className="flex gap-2">
@@ -325,7 +326,7 @@ export const IntelPage: React.FC = () => {
                                 >
                                     Xem Nhật Ký
                                 </button>
-                                <button 
+                                <button
                                     onClick={handleOptimize}
                                     disabled={optimizing}
                                     className={`btn text-[10px] h-10 flex-1 transition ${optimizing ? 'btn-disabled opacity-50' : 'btn-primary'}`}
@@ -341,12 +342,12 @@ export const IntelPage: React.FC = () => {
             {/* Signal Details Modal */}
             {selectedSignal && (
                 <>
-                    <div 
+                    <div
                         className="fixed inset-0 bg-black/85 backdrop-blur-md z-[999998] animate-fadeIn"
                         onClick={() => setSelectedSignal(null)}
                         style={{ animation: 'fadeIn 0.3s ease-out' }}
                     />
-                    <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 transition-all duration-500 bg-gradient-to-br from-slate-900 via-slate-900 to-blue-950/40 border-2 border-blue-500/30 rounded-2xl p-8 shadow-2xl z-[999999] w-full max-w-2xl" style={{boxShadow: '0 25px 80px rgba(59, 130, 246, 0.4)'}}>
+                    <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 transition-all duration-500 bg-gradient-to-br from-slate-900 via-slate-900 to-blue-950/40 border-2 border-blue-500/30 rounded-2xl p-8 shadow-2xl z-[999999] w-full max-w-2xl" style={{ boxShadow: '0 25px 80px rgba(59, 130, 246, 0.4)' }}>
                         <div className="space-y-6">
                             {/* Header with close button */}
                             <div className="flex items-center justify-between">
@@ -354,7 +355,7 @@ export const IntelPage: React.FC = () => {
                                     <h2 className="text-2xl font-black text-white mb-2">Chi Tiết Tín Hiệu</h2>
                                     <p className="text-sm text-slate-400">{selectedSignal.symbol} • {format(new Date(selectedSignal.timestamp), 'PPp')}</p>
                                 </div>
-                                <button 
+                                <button
                                     onClick={() => setSelectedSignal(null)}
                                     className="w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-slate-400 hover:text-white transition-all"
                                 >
@@ -368,12 +369,12 @@ export const IntelPage: React.FC = () => {
                             <div className="grid grid-cols-2 gap-6">
                                 <div className="space-y-2">
                                     <span className="text-[10px] font-black uppercase text-slate-500">Hướng Giao Dịch</span>
-                                    <div className={`px-4 py-2 rounded-lg text-lg font-black border text-center ${
-                                        selectedSignal.side === 'LONG'
-                                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                                            : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
-                                    }`}>
-                                        {selectedSignal.side === 'LONG' ? '📈 MUA' : '📉 BÁN'}
+                                    <div className={`px-4 py-2 rounded-lg text-lg font-black border text-center flex items-center justify-center gap-2 ${selectedSignal.side === 'LONG'
+                                        ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                                        : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                                        }`}>
+                                        {selectedSignal.side === 'LONG' ? <TrendingUp size={18} /> : <TrendingDown size={18} />}
+                                        {selectedSignal.side === 'LONG' ? 'MUA' : 'BÁN'}
                                     </div>
                                 </div>
                                 <div className="space-y-2">
@@ -407,7 +408,8 @@ export const IntelPage: React.FC = () => {
                                     }}
                                     className="flex-1 btn btn-primary text-[11px] font-bold h-11 rounded-lg"
                                 >
-                                    {approvalMode ? '🔒 Yêu Cầu Phê Duyệt' : '⚡ Thực Hiện'}
+                                    {approvalMode ? <Shield size={16} className="inline mr-2" /> : <Zap size={16} className="inline mr-2" />}
+                                    {approvalMode ? 'Yêu Cầu Phê Duyệt' : 'Thực Hiện'}
                                 </button>
                                 <button
                                     onClick={() => setSelectedSignal(null)}

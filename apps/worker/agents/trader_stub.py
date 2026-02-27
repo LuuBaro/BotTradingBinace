@@ -19,8 +19,15 @@ class TraderStub:
     def __init__(self, max_position_pct: float = 0.05):
         self.decision_count = 0
         self.position_peaks = {}  # Track highest price for trailing stop
+        
+        # Ensure max_position_pct is decimal (e.g. 0.1 rather than 10)
+        if max_position_pct > 1.0:
+            logger.warning("trader_stub_limit_normalized", original=max_position_pct, normalized=max_position_pct/100.0)
+            max_position_pct = max_position_pct / 100.0
+            
         self.max_position_pct = max_position_pct  # Store limit for validation
         logger.info("trader_stub_initialized", max_position_pct=max_position_pct)
+
     
     def calculate_dynamic_targets(self, entry_price: float, side: Side, volatility: float = 0.02) -> tuple[float, float]:
         """
@@ -51,10 +58,10 @@ class TraderStub:
             take_profit = entry_price * (1 - tp_pct)
         
         # Add slight randomness to avoid round numbers (anti-bot)
-        stop_loss += random.uniform(-3, 3)
-        take_profit += random.uniform(-5, 5)
+        stop_loss *= (1 + random.uniform(-0.0002, 0.0002))
+        take_profit *= (1 + random.uniform(-0.0002, 0.0002))
         
-        return round(stop_loss, 2), round(take_profit, 2)
+        return round(stop_loss, 4), round(take_profit, 4)
     
     def should_close_with_trailing_stop(
         self, 
@@ -156,51 +163,107 @@ class TraderStub:
         
         return False, ""
 
-    async def decide(self, snapshot: MarketSnapshot) -> Decision:
+    def _create_hold_decision(self, snapshot: MarketSnapshot, regime: MarketRegime) -> Decision:
+        hold_reasons = [
+            "Độ biến động thấp, chưa có xu hướng rõ ràng.",
+            "RSI đang ở vùng trung tính, không có tín hiệu quá mua/quá bán.",
+            "Giá đang đi ngang (sideways) tích lũy, đứng ngoài quan sát.",
+            "EMA-20 và EMA-50 chưa có dấu hiệu giao cắt.",
+            "Khối lượng giao dịch yếu, rủi ro thanh khoản nếu vào lệnh."
+        ]
+        return Decision(
+            regime=regime,
+            action=ActionType.HOLD,
+            symbol=snapshot.symbol,
+            side=None,
+            size_pct=0.01,
+            leverage=1,
+            stop_loss=None,
+            take_profit=None,
+            confidence=random.uniform(0.5, 0.7),
+            rationale=f"PHÂN TÍCH: {random.choice(hold_reasons)} Hệ thống AI quyết định đứng ngoài để bảo toàn vốn.",
+            checklist=[
+                ChecklistItem(condition="Xu hướng chưa rõ ràng", pass_=False),
+                ChecklistItem(condition="Khối lượng dưới ngưỡng", pass_=False),
+            ],
+        )
+
+    def _create_close_decision(self, snapshot: MarketSnapshot, regime: MarketRegime, side: Side, reason: str) -> Decision:
+        return Decision(
+            regime=regime,
+            action=ActionType.CLOSE,
+            symbol=snapshot.symbol,
+            side=side,
+            entry_type=OrderType.MARKET,
+            entry_price=None,
+            size_pct=1.0,  # Close 100% of position
+            leverage=1,
+            stop_loss=None,
+            take_profit=None,
+            confidence=random.uniform(0.8, 0.95),
+            rationale=reason,
+            checklist=[
+                ChecklistItem(condition="Exit condition met", pass_=True),
+                ChecklistItem(condition="Protecting capital/profit", pass_=True),
+            ],
+        )
+
+    async def decide(self, snapshot: MarketSnapshot, active_position: any = None) -> Decision:
         """
-        Generate a mock trading decision
-        
-        60% HOLD, 30% OPEN, 10% CLOSE
+        Generate a trading decision.
+        If active_position is provided, prioritize checking exit conditions (TP/SL/Trailing Stop).
         """
         self.decision_count += 1
-
-        # Random regime
         regime = random.choice(list(MarketRegime))
+        
+        # 1. Check if we should CLOSE existing position first
+        if active_position:
+            current_price = snapshot.close
+            entry_price = float(active_position.entry_price)
+            side = Side.LONG if active_position.side.upper() == "LONG" else Side.SHORT
+            
+            # Check Trailing Stop
+            should_trail_close, trail_reason = self.should_close_with_trailing_stop(
+                position_id=str(active_position.id),
+                entry_price=entry_price,
+                current_price=current_price,
+                side=side
+            )
+            
+            if should_trail_close:
+                logger.info("trader_decision_generated", action="CLOSE", reason="Trailing Stop Triggered")
+                return self._create_close_decision(snapshot, regime, side, trail_reason)
+            
+            # Check Manual TP/SL from position record
+            pnl_pct = (current_price - entry_price) / entry_price if side == Side.LONG else (entry_price - current_price) / entry_price
+            
+            # Auto-TP at 5% profit if no trailing stop triggered yet
+            if pnl_pct > 0.05:
+                logger.info("trader_decision_generated", action="CLOSE", reason="Take Profit Triggered")
+                return self._create_close_decision(snapshot, regime, side, f"TAKE PROFIT: Đạt mục tiêu lợi nhuận +{pnl_pct*100:.2f}%")
+            
+            # Auto-SL at 2.5% loss
+            if pnl_pct < -0.025:
+                logger.info("trader_decision_generated", action="CLOSE", reason="Stop Loss Triggered")
+                return self._create_close_decision(snapshot, regime, side, f"STOP LOSS: Chạm ngưỡng cắt lỗ {pnl_pct*100:.2f}% để bảo toàn vốn")
 
-        # Random action with weighted probability
+            # 80% chance to HOLD if already in position and no triggers hit
+            if random.random() < 0.8:
+                logger.info("trader_decision_generated", action="HOLD", reason="No exit triggers, holding position")
+                return self._create_hold_decision(snapshot, regime)
+            
+        # 2. Random action for new trades (if no position or 20% fallback)
         action_rand = random.random()
-        if action_rand < 0.6:
+        if action_rand < 0.7: # Higher HOLD chance
             action = ActionType.HOLD
-        elif action_rand < 0.9:
+        elif action_rand < 0.95:
             action = ActionType.OPEN
         else:
-            action = ActionType.CLOSE
+            action = ActionType.CLOSE if active_position else ActionType.HOLD
 
         # If HOLD, return minimal decision
         if action == ActionType.HOLD:
-            hold_reasons = [
-                "Độ biến động thấp, chưa có xu hướng rõ ràng.",
-                "RSI đang ở vùng trung tính, không có tín hiệu quá mua/quá bán.",
-                "Giá đang đi ngang (sideways) tích lũy, đứng ngoài quan sát.",
-                "EMA-20 và EMA-50 chưa có dấu hiệu giao cắt.",
-                "Khối lượng giao dịch yếu, rủi ro thanh khoản nếu vào lệnh."
-            ]
-            decision = Decision(
-                regime=regime,
-                action=action,
-                symbol=snapshot.symbol,
-                side=None,
-                size_pct=0.01,
-                leverage=1,
-                stop_loss=None,
-                take_profit=None,
-                confidence=random.uniform(0.5, 0.7),
-                rationale=f"PHÂN TÍCH: {random.choice(hold_reasons)} Hệ thống AI quyết định đứng ngoài để bảo toàn vốn.",
-                checklist=[
-                    ChecklistItem(condition="Trend not confirmed", pass_=False),
-                    ChecklistItem(condition="Volume below threshold", pass_=False),
-                ],
-            )
+            return self._create_hold_decision(snapshot, regime)
         else:
             # OPEN or CLOSE
             side = random.choice([Side.LONG, Side.SHORT])
@@ -291,24 +354,24 @@ class TraderStub:
         """
         Generate mock market analysis insights
         """
-        bias = random.choice(["Bullish", "Bearish", "Neutral"])
-        target = snapshot.close * (1.05 if bias == "Bullish" else 0.95 if bias == "Bearish" else 1.0)
+        bias = random.choice(["Tăng trưởng (Bullish)", "Giảm giá (Bearish)", "Trung tính (Neutral)"])
+        target = snapshot.close * (1.05 if "Tăng trưởng" in bias else 0.95 if "Giảm giá" in bias else 1.0)
         
         return {
             "bias": bias,
             "target_price": round(target, 2),
-            "expected_move": "Breakout" if random.random() > 0.5 else "Consolidation",
+            "expected_move": "Bùng nổ (Breakout)" if random.random() > 0.5 else "Tích lũy (Consolidation)",
             "support": round(snapshot.close * 0.97, 2),
             "resistance": round(snapshot.close * 1.03, 2),
-            "volatility": "High" if random.random() > 0.7 else "Medium",
+            "volatility": "Cao (High)" if random.random() > 0.7 else "Trung bình (Medium)",
             "timeframe": "1H",
             "upcoming_signals": [
                 {
                     "symbol": snapshot.symbol,
-                    "side": "LONG" if bias == "Bullish" else "SHORT",
+                    "side": "MUA (LONG)" if "Tăng trưởng" in bias else "BÁN (SHORT)",
                     "entry_zone": f"{round(target*0.99, 1)}-{round(target*1.01, 1)}",
                     "probability": random.uniform(0.6, 0.85),
-                    "rationale": f"Anticipating {bias} reversal near support"
+                    "rationale": f"Dự đoán đảo chiều {'tăng' if 'Tăng trưởng' in bias else 'giảm'} gần vùng hỗ trợ/kháng cự"
                 }
             ]
         }

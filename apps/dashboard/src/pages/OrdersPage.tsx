@@ -17,7 +17,7 @@ export const OrdersPage: React.FC = () => {
   useEffect(() => {
     const fetchOrders = async () => {
       try {
-        const response = await api.getOrders()
+        const response = await api.getOrders(200)
         // API returns a direct array, not wrapped in { orders: [] }
         setOrders(Array.isArray(response) ? response : [])
       } catch (error) {

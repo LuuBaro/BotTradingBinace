@@ -54,7 +54,7 @@ class LearningAgent:
                 losing_patterns=losing_patterns,
                 confidence_calibration=confidence_analysis,
                 recommendations=recommendations,
-                suggested_adaptations=self._suggest_adaptations(stats)
+                suggested_adaptations=self._suggest_adaptations(stats, confidence_analysis)
             )
 
             logger.info(f"✅ Learning report generated: {len(self.trades)} trades analyzed")
@@ -265,24 +265,24 @@ class LearningAgent:
         high_vol_losers = [t for t in losers if t.volatility_percentile < 40]
         if len(high_vol_losers) >= 3:
             patterns.append(PatternsDiscovered(
-                pattern_name="low_volatility",
-                description="Losses concentrated when volatility is low (<40th percentile)",
+                pattern_name="bien_dong_thap",
+                description="Thua lỗ tập trung khi biến động thị trường thấp (< 40th percentile)",
                 occurrences=len(high_vol_losers),
                 avg_loss_when_triggered=mean(t.pnl for t in high_vol_losers),
                 conditions={"volatility_percentile": "<40"},
-                recommendation="Avoid or reduce position size in low volatility"
+                recommendation="Tránh hoặc giảm khối lượng giao dịch khi biến động thấp"
             ))
 
         # Pattern 2: Wide spreads
         wide_spread_losers = [t for t in losers if t.bid_ask_spread_pips >= 5]
         if len(wide_spread_losers) >= 3:
             patterns.append(PatternsDiscovered(
-                pattern_name="wide_spreads",
-                description="Losses concentrated with wide spreads (>=5 pips)",
+                pattern_name="spread_rong",
+                description="Thua lỗ tập trung khi mức chênh lệch giá (spread) lớn (>= 5 pips)",
                 occurrences=len(wide_spread_losers),
                 avg_loss_when_triggered=mean(t.pnl for t in wide_spread_losers),
                 conditions={"bid_ask_spread_pips": ">=5"},
-                recommendation="Skip trades when spread is > 5 pips"
+                recommendation="Bỏ qua giao dịch khi spread > 5 pips để tránh trượt giá"
             ))
 
         # Pattern 3: High leverage
@@ -290,12 +290,12 @@ class LearningAgent:
         if len(high_lev_losers) >= 3:
             win_rate_high_lev = sum(1 for t in [tr for tr in self.trades if tr.entry_leverage > 5] if tr.is_winner) / len([t for t in self.trades if t.entry_leverage > 5])
             patterns.append(PatternsDiscovered(
-                pattern_name="high_leverage_risk",
-                description="Worse win rate with high leverage (>5x)",
+                pattern_name="rui_ro_don_bay_cao",
+                description="Tỷ lệ thắng thấp hơn khi sử dụng đòn bẩy cao (> 5x)",
                 occurrences=len(high_lev_losers),
                 avg_loss_when_triggered=mean(t.pnl for t in high_lev_losers),
                 conditions={"entry_leverage": ">5"},
-                recommendation="Reduce leverage or tighten SL when using leverage > 5x"
+                recommendation="Giảm đòn bẩy hoặc siết chặt điểm dừng lỗ (SL) khi dùng đòn bẩy > 5x"
             ))
 
         # Pattern 4: Certain regimes
@@ -309,12 +309,12 @@ class LearningAgent:
                 win_rate = sum(1 for t in regime_losses if t.is_winner) / len(regime_losses)
                 if win_rate < 0.4:
                     patterns.append(PatternsDiscovered(
-                        pattern_name=f"poor_performance_{regime}",
-                        description=f"Win rate only {win_rate:.1%} in '{regime}' regime",
+                        pattern_name=f"hieu_suat_kem_{regime}",
+                        description=f"Tỷ lệ thắng chỉ đạt {win_rate:.1%} trong trạng thái thị trường '{regime}'",
                         occurrences=len(regime_losers),
                         avg_loss_when_triggered=mean(t.pnl for t in regime_losers),
                         conditions={"market_regime": regime},
-                        recommendation=f"Be more selective or skip trading in '{regime}' regime"
+                        recommendation=f"Cẩn trọng hơn hoặc tạm dừng giao dịch khi thị trường ở trạng thái '{regime}'"
                     ))
 
         # Pattern 5: Time of day
@@ -328,12 +328,12 @@ class LearningAgent:
                 win_rate = sum(1 for t in hour_trades if t.is_winner) / len(hour_trades)
                 if win_rate < 0.35:
                     patterns.append(PatternsDiscovered(
-                        pattern_name=f"poor_performance_hour_{hour:02d}",
-                        description=f"Poor performance at {hour:02d}:00 UTC ({win_rate:.1%} win rate)",
+                        pattern_name=f"hieu_suat_kem_gio_{hour:02d}",
+                        description=f"Hieu suất kém vào lúc {hour:02d}:00 UTC (Tỷ lệ thắng {win_rate:.1%})",
                         occurrences=len(hour_losers),
                         avg_loss_when_triggered=mean(t.pnl for t in hour_losers),
                         conditions={"entry_hour": hour},
-                        recommendation=f"Avoid trading around {hour:02d}:00 UTC"
+                        recommendation=f"Tránh giao dịch quanh khung giờ {hour:02d}:00 UTC"
                     ))
 
         return patterns[:5]  # Return top 5 patterns
@@ -375,52 +375,55 @@ class LearningAgent:
 
         # Win rate too low
         if stats.win_rate < 0.5:
-            recommendations.append(f"Win rate is {stats.win_rate:.1%} (below 50%). Review decision logic.")
+            recommendations.append(f"Tỷ lệ thắng đang thấp ({stats.win_rate:.1%}). Cần xem lại logic vào lệnh.")
 
         # Profile factor poor
         if stats.profit_factor < 1.5:
-            recommendations.append(f"Profit factor {stats.profit_factor:.2f} indicates too many small losses. Tighten entry rules.")
+            recommendations.append(f"Hệ số lợi nhuận {stats.profit_factor:.2f} cho thấy nhiều lệnh lỗ nhỏ. Hãy siết chặt quy tắc entry.")
 
         # Too many consecutive losses
         if stats.max_consecutive_losses > 5:
-            recommendations.append(f"Max {stats.max_consecutive_losses} consecutive losses detected. Consider cooldown after losses.")
+            recommendations.append(f"Phát hiện chuỗi {stats.max_consecutive_losses} lệnh lỗ liên tiếp. Xem xét tạm nghỉ (cooldown).")
 
         # Large drawdown
         if stats.max_drawdown > 10.0:
-            recommendations.append(f"Max drawdown {stats.max_drawdown:.1f}% is high. Reduce position size or tighten risk limits.")
+            recommendations.append(f"Mức sụt giảm vốn {stats.max_drawdown:.1f}% khá cao. Giảm khối lượng hoặc siết chặt rủi ro.")
 
         # Add pattern-based recommendations
         for pattern in patterns[:3]:
-            recommendations.append(f"Pattern: {pattern.recommendation}")
+            recommendations.append(f"Tín hiệu: {pattern.recommendation}")
 
         return recommendations
 
-    def _suggest_adaptations(self, stats: TradeJournalStats) -> "SuggestedAdaptations":
+    def _suggest_adaptations(self, stats: TradeJournalStats, confidence_calibration: List[ConfidenceMetrics]) -> "SuggestedAdaptations":
         """Suggest safe auto-adapt changes (only 3 allowed variables)"""
         adaptations = SuggestedAdaptations()
 
         # 1. Size multiplier: reduce if drawdown high, increase if win rate good
         if stats.max_drawdown > 15.0:
             adaptations.size_multiplier = 0.8  # Reduce positions by 20%
-            adaptations.size_multiplier_reason = f"Max DD {stats.max_drawdown:.1f}% too high"
+            adaptations.size_multiplier_reason = f"Mức sụt giảm vốn {stats.max_drawdown:.1f}% quá cao"
         elif stats.win_rate > 0.65 and stats.profit_factor > 2.0:
             adaptations.size_multiplier = 1.1  # Increase positions by 10%
-            adaptations.size_multiplier_reason = "Win rate and PF strong"
+            adaptations.size_multiplier_reason = "Tỷ lệ thắng và Profit Factor mạnh"
 
         # 2. Confidence scaling: lower if actual results don't match confidence levels
-        if stats.confidence_calibration:
-            high_conf_wr = next((m.win_rate_in_bucket for m in stats.confidence_calibration if m.confidence_bucket == "0.8-1.0"), 0.5)
+        if confidence_calibration:
+            # Look for high confidence bucket performance
+            high_conf_metric = next((m for m in confidence_calibration if m.confidence_bucket in ["0.8-0.9", "0.9-1.0"]), None)
+            high_conf_wr = high_conf_metric.win_rate_in_bucket if high_conf_metric else 0.5
+            
             if high_conf_wr < 0.55:
                 adaptations.confidence_scaling = 0.9  # Require 10% higher confidence
-                adaptations.confidence_scaling_reason = "High confidence trades underperforming"
+                adaptations.confidence_scaling_reason = "Các lệnh độ tin cậy cao có hiệu suất thấp"
             elif high_conf_wr > 0.75:
                 adaptations.confidence_scaling = 1.1  # Allow 10% lower confidence
-                adaptations.confidence_scaling_reason = "High confidence trades performing well"
+                adaptations.confidence_scaling_reason = "Các lệnh độ tin cậy cao có hiệu suất tốt"
 
         # 3. Cooldown after loss: add if many consecutive losses
         if stats.max_consecutive_losses > 3:
             adaptations.cooldown_after_loss_minutes = 30 * stats.max_consecutive_losses
-            adaptations.cooldown_after_loss_reason = f"{stats.max_consecutive_losses} consecutive losses detected"
+            adaptations.cooldown_after_loss_reason = f"Phát hiện chuỗi {stats.max_consecutive_losses} lệnh lỗ liên tiếp"
 
         adaptations.enabled = bool(
             adaptations.size_multiplier != 1.0 or
@@ -473,6 +476,23 @@ class SuggestedAdaptations:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for storage/API"""
+        strategies = []
+        if self.size_multiplier != 1.0:
+            strategies.append({
+                "title": f"Điều chỉnh khối lượng ({int(self.size_multiplier * 100)}%)",
+                "detail": self.size_multiplier_reason or "Tối ưu hóa quy mô vị thế dựa trên tỷ lệ thắng gần đây."
+            })
+        if self.confidence_scaling != 1.0:
+            strategies.append({
+                "title": f"Siết chặt lọc tín hiệu (x{self.confidence_scaling})",
+                "detail": self.confidence_scaling_reason or "Nâng cao tiêu chuẩn vào lệnh để tránh các tín hiệu gây nhiễu."
+            })
+        if self.cooldown_after_loss_minutes > 0:
+            strategies.append({
+                "title": f"Thời gian chờ sau lỗ ({self.cooldown_after_loss_minutes}p)",
+                "detail": self.cooldown_after_loss_reason or "Tạm dừng để tránh giao dịch theo cảm xúc và bình ổn tâm lý hệ thống."
+            })
+
         return {
             "size_multiplier": self.size_multiplier,
             "size_multiplier_reason": self.size_multiplier_reason,
@@ -481,6 +501,7 @@ class SuggestedAdaptations:
             "cooldown_after_loss_minutes": self.cooldown_after_loss_minutes,
             "cooldown_after_loss_reason": self.cooldown_after_loss_reason,
             "enabled": self.enabled,
+            "strategies": strategies,
             "previous_values": self.previous_values,
             "applied_at": self.applied_at.isoformat() if self.applied_at else None
         }
@@ -537,7 +558,7 @@ class LearningReport:
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dict"""
         return {
-            "analysis_time": self.analysis_time.isoformat(),
+            "analysis_time": self.analysis_time.isoformat() + "Z",
             "trades_analyzed": self.trades_analyzed,
             "stats": self.stats.dict() if self.stats else None,
             "losing_patterns": [p.dict() for p in self.losing_patterns],

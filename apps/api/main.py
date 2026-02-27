@@ -26,6 +26,7 @@ from packages.shared.schemas import RiskConfig
 from packages.shared.logger import logger
 from apps.api.phase4_routes import router as phase4_router
 from apps.api.phase6_routes import router as phase6_router
+from apps.api.websocket import ws_manager
 
 
 # Lifespan context manager
@@ -37,9 +38,54 @@ async def lifespan(app: FastAPI):
         await init_db()
     except sqlite3.OperationalError as exc:
         logger.warning("api_init_db_skipped", error=str(exc))
+    # Start background polling tasks
+    polling_task = asyncio.create_task(poll_and_broadcast_events())
     yield
+    polling_task.cancel()
+    try:
+        await polling_task
+    except asyncio.CancelledError:
+        pass
     logger.info("api_server_shutting_down")
     await close_db()
+
+async def poll_and_broadcast_events():
+    """Poll database for new events and broadcast via WebSocket"""
+    last_event_id = 0
+    
+    # Get initial last_event_id to only broadcast new ones
+    try:
+        async with AsyncSessionFactory() as session:
+            result = await session.execute(select(Event).order_by(desc(Event.id)).limit(1))
+            last_event = result.scalar_one_or_none()
+            if last_event:
+                last_event_id = last_event.id
+    except Exception as e:
+        logger.error("initial_event_id_fetch_failed", error=str(e))
+
+    while True:
+        try:
+            async with AsyncSessionFactory() as session:
+                query = select(Event).where(Event.id > last_event_id).order_by(Event.id.asc())
+                result = await session.execute(query)
+                new_events = result.scalars().all()
+                
+                for event in new_events:
+                    event_data = {
+                        "id": event.id,
+                        "timestamp": event.timestamp.isoformat(),
+                        "level": event.level.lower(),
+                        "code": event.code,
+                        "message": event.message,
+                        "data": event.data_json
+                    }
+                    await ws_manager.broadcast_event(event_data)
+                    last_event_id = event.id
+                    
+        except Exception as e:
+            logger.error("event_polling_failed", error=str(e))
+            
+        await asyncio.sleep(2) # Poll every 2 seconds
 
 
 # Create FastAPI app
@@ -59,8 +105,8 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(phase4_router)
-app.include_router(phase6_router)
+app.include_router(phase4_router, prefix="/api")
+app.include_router(phase6_router, prefix="/api")
 
 
 # Dependency to get database session

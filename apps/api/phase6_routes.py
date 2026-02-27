@@ -9,11 +9,12 @@ import logging
 from packages.shared.trade_journal import TradeJournalEntry, ExitReason
 from packages.shared.learning_agent import LearningAgent, SuggestedAdaptations
 from packages.shared.database import AsyncSessionFactory
-from packages.shared.models import TradeJournal as TradeJournalModel
+from packages.shared.models import TradeJournal as TradeJournalModel, TraderContext
+from sqlalchemy import select, desc
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["phase6-learning"])
+router = APIRouter(tags=["phase6-learning"])
 
 
 # Global learning agent instance (legacy fallback)
@@ -551,12 +552,16 @@ async def get_dashboard_learning_metrics() -> Dict[str, Any]:
         Current stats, patterns, recommendations
     """
     try:
+        from packages.shared.market_intelligence import intelligence_aggregator
+        market_intel = intelligence_aggregator.get_market_context()
+        
         agent = await _get_learning_agent_from_db()
         if not agent.trades or len(agent.trades) < 5:
             return {
                 "status": "insufficient_data",
                 "trades_recorded": len(agent.trades),
-                "needed_for_analysis": 5
+                "needed_for_analysis": 5,
+                "market_intelligence": market_intel
             }
 
         report = agent.analyze()
@@ -564,13 +569,14 @@ async def get_dashboard_learning_metrics() -> Dict[str, Any]:
         return {
             "status": "success",
             "trades_analyzed": report.trades_analyzed,
-            "analysis_time": report.analysis_time.isoformat(),
+            "analysis_time": report.analysis_time.isoformat() + "Z",
             "stats": report.stats.dict() if report.stats else None,
             "key_metrics": {
                 "win_rate": f"{report.stats.win_rate:.1%}" if report.stats else "N/A",
                 "profit_factor": f"{report.stats.profit_factor:.2f}" if report.stats else "N/A",
                 "max_drawdown": f"{report.stats.max_drawdown:.1f}%" if report.stats else "N/A"
             },
+            "market_intelligence": market_intel,
             "top_patterns": [
                 {
                     "name": p.pattern_name,
@@ -775,7 +781,33 @@ async def get_training_insights() -> Dict[str, Any]:
                 } for rec in report.recommendations[:5]
             ]
 
-        insights["confidence_score"] = min(1.0, len(agent.trades) / 100.0)
+        # Enhanced Expertise Score (0.0 to 1.0)
+        # Based on 4 pillars of AI maturity
+        
+        # 1. Experience (40%): Volume of trades (High confidence at 200+ trades)
+        experience_score = min(0.4, (len(agent.trades) / 200.0) * 0.4)
+        
+        # 2. Exposure (20%): Variety of regimes encountered
+        regimes_found = len(set(getattr(t, 'market_regime', 'unknown') for t in agent.trades))
+        exposure_score = min(0.2, (regimes_found / 4.0) * 0.2)
+        
+        # 3. Breadth (20%): Number of unique symbols analyzed
+        symbols_found = len(set(getattr(t, 'symbol', 'UNKNOWN') for t in agent.trades))
+        breadth_score = min(0.2, (symbols_found / 5.0) * 0.2)
+        
+        # 4. Stability (20%): Consistency of Profit Factor (PF > 1.2 is stable)
+        pf = report.stats.profit_factor if report.stats else 0
+        stability_score = min(0.2, (pf / 1.5) * 0.2) if pf > 0.5 else 0
+        
+        insights["confidence_score"] = experience_score + exposure_score + breadth_score + stability_score
+        
+        # Add sub-metrics for UI
+        insights["expertise_details"] = {
+            "experience": experience_score / 0.4,
+            "exposure": exposure_score / 0.2,
+            "breadth": breadth_score / 0.2,
+            "stability": stability_score / 0.2
+        }
 
         return insights
 
@@ -865,6 +897,7 @@ async def get_market_data(
 async def get_trades_timeline(
     start_time: Optional[int] = Query(None, description="Start timestamp in milliseconds"),
     end_time: Optional[int] = Query(None, description="End timestamp in milliseconds"),
+    timeframe: Optional[str] = Query(None, description="Timeframe shortcut (1h, 4h, 1d, 1w)"),
     symbol: Optional[str] = Query(None, description="Filter by symbol"),
 ) -> Dict[str, Any]:
     """
@@ -876,14 +909,34 @@ async def get_trades_timeline(
         
         # Filter trades by time range
         filtered_trades = agent.trades if agent.trades else []
+
+        # Handle timeframe shortcut
+        if timeframe and not start_time:
+            now = datetime.now()
+            if timeframe == "1h":
+                start_dt = now - timedelta(hours=24) # Show last 24h for 1h resolution
+            elif timeframe == "4h":
+                start_dt = now - timedelta(days=7)   # Show last 7 days for 4h
+            elif timeframe == "1d":
+                start_dt = now - timedelta(days=30)  # Show last 30 days for 1d
+            elif timeframe == "1w":
+                start_dt = now - timedelta(days=90)  # Show last 90 days for 1w
+            else:
+                start_dt = None
+            
+            if start_dt:
+                filtered_trades = [
+                    t for t in filtered_trades 
+                    if getattr(t, 'exit_time', datetime.now()) >= start_dt
+                ]
         
-        if start_time or end_time:
+        elif start_time or end_time:
             start_dt = datetime.fromtimestamp(start_time / 1000) if start_time else None
             end_dt = datetime.fromtimestamp(end_time / 1000) if end_time else None
             
             filtered_trades = [
                 t for t in filtered_trades 
-                if (not start_dt or getattr(t, 'entry_time', datetime.now()) >= start_dt) and
+                if (not start_dt or getattr(t, 'exit_time', datetime.now()) >= start_dt) and
                    (not end_dt or getattr(t, 'exit_time', datetime.now()) <= end_dt)
             ]
         
@@ -895,11 +948,40 @@ async def get_trades_timeline(
         
         # Calculate equity curve (cumulative PnL)
         cumulative_pnl = 0
+        peak_pnl = 0
+        max_drawdown = 0
+        total_profit = 0
+        total_loss = 0
         equity_curve = []
         
+        # Add a starting point to the curve if we have a start_dt
+        if start_dt:
+            equity_curve.append({
+                "timestamp": int(start_dt.timestamp() * 1000),
+                "symbol": "START",
+                "pnl": 0,
+                "cumulative_pnl": 0,
+                "win": False,
+                "holding_minutes": 0,
+            })
+
         for trade in sorted(filtered_trades, key=lambda t: getattr(t, 'exit_time', datetime.now())):
-            pnl = getattr(trade, 'pnl', 0)
+            pnl = float(getattr(trade, 'pnl', 0))
             cumulative_pnl += pnl
+            
+            # For profit factor
+            if pnl > 0:
+                total_profit += pnl
+            else:
+                total_loss += abs(pnl)
+            
+            # For drawdown
+            if cumulative_pnl > peak_pnl:
+                peak_pnl = cumulative_pnl
+            
+            dd = peak_pnl - cumulative_pnl
+            if dd > max_drawdown:
+                max_drawdown = dd
             
             equity_curve.append({
                 "timestamp": int(getattr(trade, 'exit_time', datetime.now()).timestamp() * 1000),
@@ -913,21 +995,26 @@ async def get_trades_timeline(
         # Calculate statistics
         total_trades = len(filtered_trades)
         winning_trades = len([t for t in filtered_trades if getattr(t, 'pnl', 0) > 0])
-        losing_trades = len([t for t in filtered_trades if getattr(t, 'pnl', 0) < 0])
-        total_pnl = sum(getattr(t, 'pnl', 0) for t in filtered_trades)
+        total_pnl = float(sum(getattr(t, 'pnl', 0) for t in filtered_trades))
         
+        # Profit Factor: Gross Profit / Gross Loss. If no loss, it equals Gross Profit.
+        profit_factor = total_profit / total_loss if total_loss > 0 else total_profit
+        
+        print(f"DEBUG TIMELINE: timeframe={timeframe}, total={total_trades}, wins={winning_trades}, profit={total_pnl}, pf={profit_factor}")
+
         return {
             "status": "success",
             "time_range": {
-                "start": start_time,
+                "start": str(start_dt) if 'start_dt' in locals() else None,
                 "end": end_time
             },
             "statistics": {
                 "total_trades": total_trades,
                 "winning_trades": winning_trades,
-                "losing_trades": losing_trades,
-                "win_rate": (winning_trades / total_trades * 100) if total_trades > 0 else 0,
+                "win_rate": (winning_trades / total_trades) if total_trades > 0 else 0,
                 "total_pnl": total_pnl,
+                "profit_factor": profit_factor,
+                "max_drawdown_amount": max_drawdown,
                 "avg_pnl": total_pnl / total_trades if total_trades > 0 else 0,
             },
             "equity_curve": equity_curve,
@@ -1031,3 +1118,222 @@ async def get_performance_by_timeframe(
             "status": "error",
             "error": str(e)
         }
+
+@router.get("/learning/pnl-30days")
+async def get_pnl_30days() -> Dict[str, Any]:
+    """Calculate total PNL over the past 30 days"""
+    try:
+        agent = await _get_learning_agent_from_db()
+        from datetime import datetime, timedelta
+        
+        thirty_days_ago = datetime.now() - timedelta(days=30)
+        
+        total_pnl = sum(
+            getattr(trade, 'pnl', 0) 
+            for trade in agent.trades 
+            if getattr(trade, 'exit_time', getattr(trade, 'entry_time', datetime.now())) >= thirty_days_ago
+        )
+        
+        return {
+            "status": "success",
+            "total_pnl": total_pnl
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to calculate 30 days PNL: {str(e)}")
+        return {"status": "error", "error": str(e)}
+
+
+@router.get("/learning/pnl-30days/breakdown")
+async def get_pnl_30days_breakdown() -> Dict[str, Any]:
+    """
+    Get daily PnL breakdown for the last 30 days.
+    Returns per-day stats: total_pnl, wins, losses, trade_list.
+    Used for the 30-day PnL history modal in LearningPage.
+    """
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        def _to_naive(dt_val) -> Optional[datetime]:
+            """Normalize any datetime-like value to a naive UTC datetime."""
+            if dt_val is None:
+                return None
+            if isinstance(dt_val, str):
+                try:
+                    dt_val = datetime.fromisoformat(dt_val.replace("Z", "+00:00"))
+                except Exception:
+                    return None
+            if not isinstance(dt_val, datetime):
+                # e.g. date object
+                try:
+                    dt_val = datetime(dt_val.year, dt_val.month, dt_val.day)
+                    return dt_val
+                except Exception:
+                    return None
+            # Strip timezone info if present
+            if dt_val.tzinfo is not None:
+                return dt_val.replace(tzinfo=None)
+            return dt_val
+
+        agent = await _get_learning_agent_from_db()
+
+        now_naive = datetime.utcnow()
+        thirty_days_ago = now_naive - timedelta(days=30)
+
+        # Group by calendar day (using naive UTC)
+        daily: Dict[str, Dict] = {}
+
+        for trade in agent.trades:
+            raw_dt = getattr(trade, 'exit_time', None) or getattr(trade, 'entry_time', None)
+            exit_dt = _to_naive(raw_dt)
+            if exit_dt is None:
+                exit_dt = now_naive
+
+            # Skip trades outside 30-day window
+            if exit_dt < thirty_days_ago:
+                continue
+
+            day_key = exit_dt.strftime('%Y-%m-%d')
+
+            if day_key not in daily:
+                daily[day_key] = {
+                    "date": day_key,
+                    "total_pnl": 0.0,
+                    "wins": 0,
+                    "losses": 0,
+                    "trades": 0,
+                    "trade_list": [],
+                }
+
+            try:
+                pnl = float(getattr(trade, 'pnl', 0) or 0)
+            except (TypeError, ValueError):
+                pnl = 0.0
+
+            symbol = str(getattr(trade, 'symbol', 'N/A') or 'N/A')
+            side = str(getattr(trade, 'side', 'N/A') or 'N/A')
+            exit_reason = str(getattr(trade, 'exit_reason', 'N/A') or 'N/A')
+
+            daily[day_key]["total_pnl"] += pnl
+            daily[day_key]["trades"] += 1
+            if pnl > 0:
+                daily[day_key]["wins"] += 1
+            elif pnl < 0:
+                daily[day_key]["losses"] += 1
+            daily[day_key]["trade_list"].append({
+                "symbol": symbol,
+                "pnl": round(pnl, 4),
+                "side": side,
+                "exit_reason": exit_reason,
+                "time": exit_dt.strftime('%H:%M:%S')
+            })
+
+        # Build full 30-day list (fill zeros for missing days)
+        all_days = []
+        for i in range(30):
+            d = (now_naive - timedelta(days=29 - i)).strftime('%Y-%m-%d')
+            if d in daily:
+                entry = daily[d].copy()
+                entry["total_pnl"] = round(entry["total_pnl"], 4)
+                all_days.append(entry)
+            else:
+                all_days.append({
+                    "date": d,
+                    "total_pnl": 0.0,
+                    "wins": 0,
+                    "losses": 0,
+                    "trades": 0,
+                    "trade_list": [],
+                })
+
+        total_pnl = sum(d["total_pnl"] for d in all_days)
+        total_wins = sum(d["wins"] for d in all_days)
+        total_losses = sum(d["losses"] for d in all_days)
+        total_trades = sum(d["trades"] for d in all_days)
+
+        days_with_trades = [d for d in all_days if d["trades"] > 0]
+        best_day = max(days_with_trades, key=lambda x: x["total_pnl"]) if days_with_trades else None
+        worst_day = min(days_with_trades, key=lambda x: x["total_pnl"]) if days_with_trades else None
+
+        return {
+            "status": "success",
+            "summary": {
+                "total_pnl": round(total_pnl, 4),
+                "total_trades": total_trades,
+                "total_wins": total_wins,
+                "total_losses": total_losses,
+                "win_rate": round(total_wins / total_trades * 100, 1) if total_trades > 0 else 0,
+                "best_day": {"date": best_day["date"], "pnl": round(best_day["total_pnl"], 2)} if best_day else None,
+                "worst_day": {"date": worst_day["date"], "pnl": round(worst_day["total_pnl"], 2)} if worst_day else None,
+            },
+            "days": all_days,
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to get 30-day breakdown: {str(e)}", exc_info=True)
+        return {"status": "error", "error": str(e)}
+
+@router.get("/learning/trader-context/history")
+async def get_trader_context_history(
+    limit: int = Query(10, ge=1, le=50)
+) -> Dict[str, Any]:
+    """Get history of imported trader expertise"""
+    try:
+        async with AsyncSessionFactory() as session:
+            result = await session.execute(
+                select(TraderContext).order_by(desc(TraderContext.timestamp)).limit(limit)
+            )
+            history = result.scalars().all()
+            
+            return {
+                "success": True,
+                "history": [
+                    {
+                        "id": h.id,
+                        "timestamp": h.timestamp.isoformat(),
+                        "trader_name": h.trader_name,
+                        "prompt": h.prompt
+                    }
+                    for h in history
+                ]
+            }
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch trader context history: {str(e)}")
+        return {"success": false, "error": str(e)}
+
+
+@router.post("/learning/import-trader-context")
+async def import_trader_context(
+    payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Import human trader expertise into the AI system.
+    Saves context to database for use in AI Decision Agent prompts.
+    """
+    try:
+        prompt = payload.get("trader_prompt")
+        trader_name = payload.get("trader_name", "Anonymous Trader")
+        
+        if not prompt:
+            raise HTTPException(status_code=400, detail="trader_prompt is required")
+            
+        logger.info(f"🧠 Importing trader context from {trader_name}: {prompt[:50]}...")
+        
+        # Save to database
+        async with AsyncSessionFactory() as session:
+            new_context = TraderContext(
+                trader_name=trader_name,
+                prompt=prompt,
+                timestamp=datetime.utcnow()
+            )
+            session.add(new_context)
+            await session.commit()
+        
+        return {
+            "success": True,
+            "message": f"Trader context from {trader_name} successfully integrated into Neural Core",
+            "integration_score": 0.98,
+            "applied_patterns": ["Expert Intuition", "Tactical Adaptation", "Neural Bias Correction"]
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Trader context import failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

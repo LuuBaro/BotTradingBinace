@@ -19,6 +19,7 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
     { path: '/intel', label: 'Neural Watch', icon: <Brain size={20} /> },
     { path: '/positions', label: 'Active Zones', icon: <Activity size={20} /> },
     { path: '/orders', label: 'Order Stack', icon: <Terminal size={20} /> },
+    { path: '/trade-history', label: 'Trade History', icon: <History size={20} /> },
     { path: '/trades', label: 'Trace Logs', icon: <History size={20} /> },
     { path: '/risk-config', label: 'Risk Vault', icon: <Shield size={20} /> },
     { path: '/system-health', label: 'Health Nexus', icon: <HeartPulse size={20} /> },

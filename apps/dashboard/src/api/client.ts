@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosError } from 'axios'
+import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios'
 
 export interface ApiConfig {
   baseURL: string
@@ -32,8 +32,8 @@ export class ApiClient {
   }
 
   // Generic helpers
-  async get<T = any>(url: string) {
-    const res = await this.axiosInstance.get<T>(url)
+  async get<T = any>(url: string, config?: AxiosRequestConfig) {
+    const res = await this.axiosInstance.get<T>(url, config)
     return res
   }
 
@@ -43,6 +43,11 @@ export class ApiClient {
   }
 
   // Auth endpoints
+  async getSystemStatus() {
+    const res = await this.axiosInstance.get('system/status')
+    return res.data
+  }
+
   async login(username: string, password: string) {
     console.log('🔐 Attempting login with:', { username })
     const res = await this.axiosInstance.post('auth/login', {
@@ -83,8 +88,13 @@ export class ApiClient {
     }
   }
 
-  async getOrders() {
-    const res = await this.axiosInstance.get('orders')
+  async getOrders(limit = 100) {
+    const res = await this.axiosInstance.get(`orders?limit=${limit}`)
+    return res.data
+  }
+
+  async getTrades(limit = 100) {
+    const res = await this.axiosInstance.get(`trades?limit=${limit}`)
     return res.data
   }
 

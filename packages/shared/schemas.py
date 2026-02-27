@@ -76,6 +76,20 @@ class RiskConfig(BaseModel):
     )
     mandatory_sl_tp: bool = Field(default=True, description="Require SL/TP on all trades")
 
+    @field_validator(
+        "max_drawdown_day_pct",
+        "max_position_pct",
+        "max_risk_per_trade_pct",
+    )
+    @classmethod
+    def validate_pct(cls, v: float) -> float:
+        """Ensure percentage is decimal (e.g. 0.1 rather than 10)"""
+        if v > 1.0:
+            # If user provides 10.0 meaning 10%, convert to 0.1
+            return v / 100.0
+        return v
+
+
 
 class RiskValidationResult(BaseModel):
     """Result of risk engine validation"""

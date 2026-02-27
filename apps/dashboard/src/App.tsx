@@ -7,6 +7,7 @@ import { OverviewPage } from './pages/OverviewPage'
 import { PositionsPage } from './pages/PositionsPage'
 import { OrdersPage } from './pages/OrdersPage'
 import { TradesPage } from './pages/TradesPage'
+import { TradeHistoryPage } from './pages/TradeHistoryPage'
 import { RiskConfigPage } from './pages/RiskConfigPage'
 import { SystemHealthPage } from './pages/SystemHealthPage'
 import { EventsPage } from './pages/EventsPage'
@@ -44,6 +45,7 @@ function App() {
           <Route path="/intel" element={<IntelPage />} />
           <Route path="/positions" element={<PositionsPage />} />
           <Route path="/orders" element={<OrdersPage />} />
+          <Route path="/trade-history" element={<TradeHistoryPage />} />
           <Route path="/trades" element={<TradesPage />} />
           <Route path="/risk-config" element={<RiskConfigPage />} />
           <Route path="/system-health" element={<SystemHealthPage />} />

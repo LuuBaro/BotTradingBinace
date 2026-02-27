@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react'
 import { useConfigStore } from '../store'
 import { createApiClient, getApiBaseUrl } from '../api/client'
-import { Save, RotateCcw, History, AlertTriangle, CheckCircle2, Cpu, Lock, Terminal, ShieldCheck, ChevronRight } from 'lucide-react'
+import { Save, RotateCcw, History, AlertTriangle, CheckCircle2, Cpu, Lock, Terminal, ShieldCheck, ChevronRight, Info } from 'lucide-react'
 import { format } from 'date-fns'
 
 export const RiskConfigPage: React.FC = () => {
@@ -110,9 +110,9 @@ export const RiskConfigPage: React.FC = () => {
         </div>
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-10 items-stretch">
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-10 items-start">
         {/* Config Editor - Neural Parameters */}
-        <div className="xl:col-span-8 flex flex-col gap-6">
+        <div className="xl:col-span-8 flex flex-col gap-6 xl:sticky xl:top-8">
           <div className="card glass-dark border-white/5 shadow-3xl overflow-hidden relative flex flex-col h-full">
             <div className="p-8 border-b border-white/5 bg-white/[0.01]">
               <div className="flex justify-between items-center">
@@ -139,12 +139,40 @@ export const RiskConfigPage: React.FC = () => {
                       .map(w => w.charAt(0).toUpperCase() + w.slice(1))
                       .join(' ')
 
+                    const meta: Record<string, { unit: string, desc: string }> = {
+                      max_leverage: { unit: 'x', desc: 'Hệ số đòn bẩy tối đa cho mỗi vị thế (VD: 5 = đòn bẩy 5x)' },
+                      max_position_size: { unit: '%', desc: 'Kích thước lệnh (vol) tối đa tính theo phần trăm tổng số dư khả dụng (VD: 0.1 = 10% ví)' },
+                      max_position_pct: { unit: '%', desc: 'Kích thước lệnh (vol) tối đa tính theo phần trăm tổng số dư khả dụng (VD: 0.1 = 10% ví)' },
+                      max_daily_loss: { unit: '%', desc: 'Mức thua lỗ tối đa cho phép trong ngày, tính theo % số dư (VD: 0.02 = ngừng trade nếu lỗ 2%)' },
+                      max_drawdown_day_pct: { unit: '%', desc: 'Giới hạn sụt giảm vốn (drawdown) tối đa trong ngày tính theo % tổng số dư' },
+                      min_win_rate: { unit: '%', desc: 'Tỷ lệ thắng (Win rate) tối thiểu hệ thống phải giữ để tiếp tục giao dịch' },
+                      max_risk_per_trade_pct: { unit: '%', desc: 'Mức rủi ro vốn lớn nhất trên MỘT lệnh dựa trên số dư (VD: 0.02 = rủi ro 2% tài khoản cho 1 lệnh)' },
+                      max_orders_per_hour: { unit: 'Lệnh', desc: 'Số lượng lệnh giao dịch (vào lệnh) tối đa được thực hiện trong khoảng thời gian một giờ' },
+                      max_concurrent_positions: { unit: 'Lệnh', desc: 'Số lệnh (vị thế) đang chạy cùng lúc tối đa' },
+                      cooldown_after_loss: { unit: 'Giây', desc: 'Thời gian treo máy (tạm nghỉ) tính bằng giây sau khi dính 1 lệnh stoploss' },
+                      mandatory_sl_tp: { unit: 'Bật/Tắt', desc: 'Bắt buộc mọi vị thế mở do AI tạo ra đều phải cài sẵn Cắt lỗ (SL) và Chốt lời (TP)' }
+                    }
+
+                    const fieldMeta = meta[key.toLowerCase()] || { unit: typeof value === 'number' ? 'NUM' : 'VAL', desc: 'Thông số hệ thống nâng cao' };
+
                     return (
                       <div key={key} className="space-y-3 group">
                         <div className="flex justify-between items-center px-1">
-                          <label className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] group-focus-within:text-blue-400 transition-colors">
-                            {displayKey}
-                          </label>
+                          <div className="relative group/tooltip">
+                            <label 
+                              className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] group-focus-within:text-blue-400 transition-colors flex items-center gap-2 cursor-help"
+                            >
+                              {displayKey}
+                              <Info size={12} className="opacity-50 group-hover/tooltip:opacity-100 group-hover/tooltip:text-blue-400 transition-all" />
+                            </label>
+                            {/* Custom Tooltip */}
+                            <div className="absolute left-0 bottom-full mb-2 hidden group-hover/tooltip:block z-50 w-[240px] pointer-events-none">
+                              <div className="bg-slate-900 border border-white/10 p-3 rounded-lg shadow-2xl backdrop-blur-md">
+                                <p className="text-[11px] font-medium leading-relaxed text-slate-300 normal-case tracking-normal">{fieldMeta.desc}</p>
+                              </div>
+                              <div className="absolute -bottom-1 left-4 w-2 h-2 bg-slate-900 border-r border-b border-white/10 transform rotate-45"></div>
+                            </div>
+                          </div>
                           <span className="text-[9px] font-mono text-slate-700 opacity-0 group-hover:opacity-100 transition-opacity uppercase">{typeof value}</span>
                         </div>
                         <div className="relative">
@@ -154,7 +182,12 @@ export const RiskConfigPage: React.FC = () => {
                             onChange={(e) => {
                               let newVal: any = e.target.value;
                               if (typeof value === 'number') {
-                                newVal = parseFloat(e.target.value) || 0;
+                                // Strip leading zeros to fix the '010' issue user encountered
+                                if (newVal.length > 1 && newVal.startsWith('0') && !newVal.startsWith('0.')) {
+                                  newVal = newVal.replace(/^0+/, '');
+                                  if (newVal === '') newVal = '0';
+                                }
+                                newVal = newVal === '' ? '' : Number(newVal);
                               } else if (isObject) {
                                 try {
                                   newVal = JSON.parse(e.target.value);
@@ -167,12 +200,15 @@ export const RiskConfigPage: React.FC = () => {
                                 [key]: newVal,
                               })
                             }}
-                            className="w-full bg-slate-950/50 border border-white/5 py-3 px-5 rounded-2xl text-white font-bold font-mono focus:border-blue-500/50 focus:ring-4 focus:ring-blue-500/10 outline-none transition-all group-hover:bg-slate-900/50 text-sm"
+                            className="w-full bg-slate-950/50 border border-white/5 py-3 px-5 rounded-2xl text-white font-bold font-mono focus:border-blue-500/50 focus:ring-4 focus:ring-blue-500/10 outline-none transition-all group-hover:bg-slate-900/50 text-sm [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                             step={typeof value === 'number' && Math.abs(value) < 1 ? '0.01' : '1'}
                           />
-                          {typeof value === 'number' && (
-                            <div className="absolute right-4 top-1/2 -translate-y-1/2 opacity-20 pointer-events-none text-[10px] font-black">NUM</div>
-                          )}
+                          <div 
+                            className="absolute right-4 top-1/2 -translate-y-1/2 opacity-30 text-[10px] font-black uppercase pointer-events-none"
+                            title={fieldMeta.desc}
+                          >
+                            {fieldMeta.unit}
+                          </div>
                         </div>
                       </div>
                     )

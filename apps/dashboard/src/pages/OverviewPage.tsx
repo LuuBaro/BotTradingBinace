@@ -16,7 +16,8 @@ export const OverviewPage: React.FC = () => {
   const [pnlHistory, setPnlHistory] = useState<any[]>([])
   const [timeRange, setTimeRange] = useState<'1H' | '4H' | '1D' | '1W'>('1D')
   const [healthStatus, setHealthStatus] = useState<any>(null)
-  const [pnlBreakdown, setPnlBreakdown] = useState({ realized: 0, unrealized: 0 })
+  const [pnlBreakdown, setPnlBreakdown] = useState({ realized: 0, realizedTotal: 0, unrealized: 0 })
+  const [walletBalance, setWalletBalance] = useState<any>(null)
   const [hoveredCardIndex, setHoveredCardIndex] = useState<number | null>(null)
 
   // Memoized API client
@@ -27,14 +28,15 @@ export const OverviewPage: React.FC = () => {
     const fetchData = async () => {
       try {
         const days = timeRange === '1W' ? 7 : 1
-        const [status, posResponse, ordResponse, decisionsResponse, historyData, latencyData, healthData] = await Promise.all([
+        const [status, posResponse, ordResponse, decisionsResponse, historyData, latencyData, healthData, walletData] = await Promise.all([
           api.getBotStatus(),
           api.getPositions(),
           api.getOrders(),
           api.getDecisions(10),
           api.getPnlHistory(days),
           api.getLatencyMetrics().catch(() => null),
-          api.getHealthStatus().catch(() => null)
+          api.getHealthStatus().catch(() => null),
+          api.getWalletBalance().catch(() => null)
         ])
 
         const currentPositions = Array.isArray(posResponse) ? posResponse : []
@@ -48,9 +50,10 @@ export const OverviewPage: React.FC = () => {
         // Calculate PnL (Realized + Unrealized)
         const unrealizedPnL = currentPositions.reduce((sum: number, p: any) => sum + (p.unrealized_pnl || 0), 0)
         const realizedPnL = status.realized_pnl_today || 0
-        const currentTotalPnL = realizedPnL + unrealizedPnL
+        const realizedTotal = status.realized_pnl_total || 0
+        const currentTotalPnL = realizedPnL + unrealizedPnL // Today's total (Daily perspective)
         setPnlToday(currentTotalPnL)
-        setPnlBreakdown({ realized: realizedPnL, unrealized: unrealizedPnL })
+        setPnlBreakdown({ realized: realizedPnL, realizedTotal: realizedTotal, unrealized: unrealizedPnL })
 
         if (Array.isArray(historyData) && historyData.length > 0) {
           // Filter historyData based on timeRange if needed
@@ -98,10 +101,14 @@ export const OverviewPage: React.FC = () => {
         if (latencyData) {
           setLatency(latencyData)
         }
-        
+
         if (healthData) {
           setHealth(healthData)
           setHealthStatus(healthData)
+        }
+
+        if (walletData) {
+          setWalletBalance(walletData)
         }
 
         setBotStatus({
@@ -125,8 +132,24 @@ export const OverviewPage: React.FC = () => {
   const uptimeHours = botStatus?.uptime_seconds ? Math.floor(botStatus.uptime_seconds / 3600) : 0
   const uptimeMinutes = botStatus?.uptime_seconds ? Math.floor((botStatus.uptime_seconds % 3600) / 60) : 0
 
+  // Effect to boost main container z-index when tooltip is open to prevent header overlap
+  useEffect(() => {
+    const mainContainer = document.querySelector('main');
+    if (hoveredCardIndex !== null) {
+      if (mainContainer) mainContainer.style.zIndex = '9999';
+      document.body.style.overflow = 'hidden';
+    } else {
+      if (mainContainer) mainContainer.style.zIndex = '';
+      document.body.style.overflow = '';
+    }
+    return () => {
+      if (mainContainer) mainContainer.style.zIndex = '';
+      document.body.style.overflow = '';
+    };
+  }, [hoveredCardIndex]);
+
   return (
-    <div className="space-y-10 animate-fadeIn bg-mesh min-h-full pb-20 px-4 pt-4">
+    <div className="space-y-6 md:space-y-10 animate-fadeIn bg-mesh min-h-full pb-20 px-3 md:px-6 pt-4 overflow-x-hidden">
       {/* Hero Section */}
       <div className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-6 mb-4">
         <div className="space-y-2">
@@ -134,27 +157,27 @@ export const OverviewPage: React.FC = () => {
             <span className="w-2 h-2 bg-emerald-500 rounded-full animate-glow shadow-[0_0_8px_#10b981]"></span>
             <span className="text-[10px] uppercase font-black tracking-[0.3em] text-emerald-400">Trạng thái: Tối ưu (Optimized)</span>
           </div>
-          <h1 className="text-5xl font-black tracking-tighter text-white">Neural Hub</h1>
-          <p className="text-slate-400 font-medium">Tổng hợp trí tuệ AI và dữ liệu hệ thống</p>
+          <h1 className="text-3xl md:text-5xl font-black tracking-tighter text-white">Neural Hub</h1>
+          <p className="text-slate-400 font-medium text-xs md:text-base">Tổng hợp trí tuệ AI và dữ liệu hệ thống</p>
         </div>
-        <div className="flex gap-4">
-          <div className="px-5 py-3 glass-dark border-white/5 rounded-2xl flex items-center gap-3">
-            <div className="w-10 h-10 bg-blue-500/10 rounded-xl flex items-center justify-center border border-blue-500/20">
-              <Activity className="text-blue-400" size={20} />
+        <div className="grid grid-cols-2 lg:flex gap-3 md:gap-4 w-full lg:w-auto">
+          <div className="px-4 md:px-5 py-3 glass-dark border-white/5 rounded-2xl flex items-center gap-3">
+            <div className="w-8 h-8 md:w-10 md:h-10 bg-blue-500/10 rounded-xl flex items-center justify-center border border-blue-500/20">
+              <Activity className="text-blue-400" size={16} />
             </div>
             <div>
-              <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Độ trễ (Latency)</span>
-              <span className="text-lg font-black font-mono text-blue-100">{latency?.ws_p95 || 24}ms</span>
+              <span className="text-[8px] md:text-[10px] font-black text-slate-500 uppercase tracking-widest block">Độ trễ</span>
+              <span className="text-sm md:text-lg font-black font-mono text-blue-100">{latency?.ws_p95 || 24}ms</span>
             </div>
           </div>
-          <div className="px-5 py-3 glass-dark border-white/5 rounded-2xl flex items-center gap-3">
-            <div className="w-10 h-10 bg-purple-500/10 rounded-xl flex items-center justify-center border border-purple-500/20">
-              <Shield className="text-purple-400" size={20} />
+          <div className="px-4 md:px-5 py-3 glass-dark border-white/5 rounded-2xl flex items-center gap-3">
+            <div className="w-8 h-8 md:w-10 md:h-10 bg-purple-500/10 rounded-xl flex items-center justify-center border border-purple-500/20">
+              <Shield className="text-purple-400" size={16} />
             </div>
             <div>
-              <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Chế độ bảo vệ (Gatekeeper)</span>
-              <span className={`text-lg font-black uppercase ${botStatus?.approval_mode ? 'text-amber-400' : 'text-emerald-400'}`}>
-                {botStatus?.approval_mode ? 'Thủ công' : 'Tự động (Autopilot)'}
+              <span className="text-[8px] md:text-[10px] font-black text-slate-500 uppercase tracking-widest block">Chế độ</span>
+              <span className={`text-sm md:text-lg font-black uppercase ${botStatus?.approval_mode ? 'text-amber-400' : 'text-emerald-400'}`}>
+                {botStatus?.approval_mode ? 'Thủ công' : 'Auto'}
               </span>
             </div>
           </div>
@@ -162,18 +185,18 @@ export const OverviewPage: React.FC = () => {
       </div>
 
       {/* 3D-like Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 overflow-visible">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6 overflow-visible">
         {[
           { label: 'Môi trường (Risk Mode)', value: botStatus?.mode || 'Demo', sub: botStatus?.paused ? 'SYSTEM PAUSED' : 'LIVE TRADING', color: 'text-blue-400', icon: <Server size={14} />, gradient: 'from-blue-500/10' },
           { label: 'Thời gian hoạt động', value: `${uptimeHours}h ${uptimeMinutes}m`, sub: `${positions.length} Vị thế đang mở`, color: 'text-purple-400', icon: <Clock size={14} />, gradient: 'from-purple-500/10' },
-          { label: 'Tổng Alpha (PnL)', value: `$${pnlToday.toFixed(2)}`, sub: `${orders.length} Lệnh đã xử lý`, color: pnlToday >= 0 ? 'text-emerald-400' : 'text-rose-400', icon: <TrendingUp size={14} />, gradient: pnlToday >= 0 ? 'from-emerald-500/10' : 'from-rose-500/10', tooltip: true },
+          { label: 'Alpha Hôm Nay (PnL)', value: `$${pnlToday.toFixed(2)}`, sub: `Kết quả giao dịch trong ngày`, color: pnlToday >= 0 ? 'text-emerald-400' : 'text-rose-400', icon: <TrendingUp size={14} />, gradient: pnlToday >= 0 ? 'from-emerald-500/10' : 'from-rose-500/10', tooltip: true },
           { label: 'Sự kiện hệ thống', value: `${events.length}`, sub: 'Dữ liệu telemetry đang hoạt động', color: 'text-amber-400', icon: <Database size={14} />, gradient: 'from-amber-500/10' },
         ].map((stat, i) => (
-          <div 
-            key={i} 
-            className={`relative card ${stat.tooltip ? 'overflow-visible' : ''} bg-gradient-to-br ${stat.gradient} to-transparent border-white/5 p-6 hover:scale-[1.02] transition-all`}
-            onMouseEnter={() => stat.tooltip && setHoveredCardIndex(i)}
-            onMouseLeave={() => setHoveredCardIndex(null)}
+          <div
+            key={i}
+            className={`relative card ${stat.tooltip ? 'overflow-visible cursor-pointer' : ''} ${hoveredCardIndex === i ? 'z-50' : 'z-0'} bg-gradient-to-br ${stat.gradient} to-transparent border-white/5 p-5 md:p-6 hover:scale-[1.02] active:scale-[0.98] transition-all group`}
+            onClick={() => stat.tooltip && setHoveredCardIndex(i)}
+            onMouseEnter={() => !stat.tooltip && setHoveredCardIndex(null)}
           >
             <div className="flex items-center gap-2 mb-4">
               <div className="p-1.5 bg-white/5 rounded-lg text-slate-400 group-hover:text-white transition-colors">
@@ -183,118 +206,115 @@ export const OverviewPage: React.FC = () => {
             </div>
             <div className={`text-4xl font-black ${stat.color} tracking-tighter mb-1`}>{stat.value}</div>
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{stat.sub}</div>
-            
-            {/* PnL Tooltip - Improved Design with Backdrop */}
+
+            {/* PnL Tooltip */}
             {stat.tooltip && hoveredCardIndex === i && (
               <>
-                {/* Backdrop Overlay - Maximum Coverage */}
-                <div 
-                  className="fixed inset-0 bg-black/85 animate-fadeIn pointer-events-auto"
+                <div
+                  className="fixed inset-0 bg-black/85 transition-opacity"
                   onClick={() => setHoveredCardIndex(null)}
-                  style={{ 
-                    animation: 'fadeIn 0.3s ease-out',
-                    zIndex: 999998,
+                  style={{
+                    zIndex: 99999998,
                     backdropFilter: 'blur(8px)',
                     WebkitBackdropFilter: 'blur(8px)'
                   }}
                 />
-                
-                {/* Tooltip Content */}
-                <div 
-                  className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 transition-all duration-500 bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/40 border-2 border-emerald-500/30 rounded-2xl p-6 shadow-2xl w-80 opacity-100 scale-100 backdrop-blur-xl pointer-events-auto" 
-                  style={{
-                    boxShadow: '0 25px 80px rgba(16, 185, 129, 0.4), inset 0 1px 1px rgba(255,255,255,0.1)',
-                    zIndex: 999999
-                  }}
-                >
-                {/* Close button */}
-                <button 
-                  onClick={(e) => { e.stopPropagation(); setHoveredCardIndex(null); }}
-                  className="absolute top-3 right-3 w-6 h-6 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-slate-400 hover:text-white transition-all"
-                >
-                  ✕
-                </button>
-                
-                <div className="space-y-4">
-                  {/* Header */}
-                  <div className="pb-3 border-b border-emerald-500/20">
-                    <div className="flex items-center gap-3 mb-2">
-                      <div className="w-10 h-10 bg-emerald-500/10 rounded-xl flex items-center justify-center border border-emerald-500/30">
-                        <TrendingUp className="text-emerald-400" size={20} />
-                      </div>
-                      <div>
-                        <h3 className="text-sm font-black uppercase tracking-wider text-emerald-300">Chi Tiết P&L</h3>
-                        <p className="text-[9px] text-slate-400 uppercase tracking-wide">Profit & Loss Breakdown</p>
-                      </div>
-                    </div>
-                  </div>
-                  
-                  {/* Breakdown Cards */}
-                  <div className="space-y-3">
-                    {/* Realized PnL */}
-                    <div className="bg-gradient-to-br from-slate-800/80 to-emerald-950/40 rounded-xl p-4 border border-emerald-500/20 hover:border-emerald-500/40 transition-all group">
-                      <div className="flex justify-between items-center">
-                        <div className="space-y-1">
-                          <div className="text-[10px] text-slate-400 uppercase tracking-wide font-semibold">Realized</div>
-                          <div className="text-[9px] text-emerald-300/60">Đã Đóng Lệnh</div>
-                        </div>
-                        <div className="text-right">
-                          <div className={`text-xl font-black font-mono ${pnlBreakdown.realized >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {pnlBreakdown.realized >= 0 ? '+' : ''}${pnlBreakdown.realized.toFixed(2)}
+                <div className="fixed inset-0 z-[99999999] flex items-center justify-center p-4 pointer-events-none">
+                  <div className="w-[340px] max-w-full max-h-[90vh] bg-[#020617] border-2 border-emerald-500/40 rounded-3xl p-6 shadow-[0_0_100px_rgba(0,0,0,0.9)] pointer-events-auto relative overflow-y-auto custom-scrollbar">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setHoveredCardIndex(null); }}
+                      className="absolute top-4 right-4 w-8 h-8 rounded-xl bg-white/5 hover:bg-white/10 flex items-center justify-center text-slate-400 hover:text-white transition-all z-10"
+                    >
+                      ✕
+                    </button>
+
+                    <div className="space-y-4 relative z-1">
+                      <div className="pb-3 border-b border-white/5">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 bg-emerald-500/10 rounded-xl flex items-center justify-center border border-emerald-500/20">
+                            <TrendingUp className="text-emerald-400" size={20} />
                           </div>
-                          <div className="text-[8px] text-slate-500 mt-0.5">từ lệnh đã chốt</div>
-                        </div>
-                      </div>
-                    </div>
-                    
-                    {/* Unrealized PnL */}
-                    <div className="bg-gradient-to-br from-slate-800/80 to-blue-950/40 rounded-xl p-4 border border-blue-500/20 hover:border-blue-500/40 transition-all">
-                      <div className="flex justify-between items-center">
-                        <div className="space-y-1">
-                          <div className="text-[10px] text-slate-400 uppercase tracking-wide font-semibold">Unrealized</div>
-                          <div className="text-[9px] text-blue-300/60">Đang Mở</div>
-                        </div>
-                        <div className="text-right">
-                          <div className={`text-xl font-black font-mono ${pnlBreakdown.unrealized >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {pnlBreakdown.unrealized >= 0 ? '+' : ''}${pnlBreakdown.unrealized.toFixed(2)}
-                          </div>
-                          <div className="text-[8px] text-slate-500 mt-0.5">từ vị thế hiện tại</div>
-                        </div>
-                      </div>
-                    </div>
-                    
-                    {/* Total */}
-                    <div className="bg-gradient-to-br from-emerald-950/60 to-slate-900 rounded-xl p-5 border-2 border-emerald-500/40 relative overflow-hidden">
-                      <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/5 to-transparent"></div>
-                      <div className="relative flex justify-between items-center">
-                        <div>
-                          <div className="text-[11px] font-black text-white uppercase tracking-widest">Tổng Cộng</div>
-                          <div className="text-[8px] text-emerald-300/60 mt-0.5">Total P&L Today</div>
-                        </div>
-                        <div className="text-right">
-                          <div className={`text-2xl font-black font-mono ${pnlToday >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {pnlToday >= 0 ? '+' : ''}${pnlToday.toFixed(2)}
+                          <div>
+                            <h3 className="text-sm font-black uppercase tracking-wider text-emerald-300">Chi Tiết P&L</h3>
+                            <p className="text-[9px] text-slate-500 uppercase tracking-wide">Profit & Loss Breakdown</p>
                           </div>
                         </div>
                       </div>
+
+                      <div className="space-y-3">
+                        <div className="bg-white/[0.03] rounded-xl p-4 border border-white/5 hover:border-emerald-500/20 transition-all">
+                          <div className="flex justify-between items-center">
+                            <div className="space-y-1">
+                              <div className="text-[10px] text-slate-400 uppercase tracking-wide font-semibold">Realized (Today)</div>
+                              <div className="text-[9px] text-emerald-300/60">Từ 00:00 UTC</div>
+                            </div>
+                            <div className={`text-xl font-black font-mono ${pnlBreakdown.realized >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {pnlBreakdown.realized >= 0 ? '+' : ''}${pnlBreakdown.realized.toFixed(2)}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="bg-white/[0.03] rounded-xl p-4 border border-white/5 hover:border-amber-500/20 transition-all">
+                          <div className="flex justify-between items-center">
+                            <div className="space-y-1">
+                              <div className="text-[10px] text-slate-400 uppercase tracking-wide font-semibold">Realized (All-Time)</div>
+                              <div className="text-[9px] text-amber-300/60">Tổng Từ Trước Đến Nay</div>
+                            </div>
+                            <div className={`text-xl font-black font-mono ${pnlBreakdown.realizedTotal >= 0 ? 'text-amber-400' : 'text-rose-400'}`}>
+                              {pnlBreakdown.realizedTotal >= 0 ? '+' : ''}${pnlBreakdown.realizedTotal.toFixed(2)}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="bg-white/[0.03] rounded-xl p-4 border border-white/5 hover:border-blue-500/20 transition-all">
+                          <div className="flex justify-between items-center">
+                            <div className="space-y-1">
+                              <div className="text-[10px] text-slate-400 uppercase tracking-wide font-semibold">Unrealized</div>
+                              <div className="text-[9px] text-blue-300/60">Vị Thế Đang Mở</div>
+                            </div>
+                            <div className={`text-xl font-black font-mono ${pnlBreakdown.unrealized >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {pnlBreakdown.unrealized >= 0 ? '+' : ''}${pnlBreakdown.unrealized.toFixed(2)}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="bg-white/[0.03] rounded-xl p-4 border border-white/5 hover:border-purple-500/20 transition-all">
+                          <div className="flex justify-between items-center">
+                            <div className="space-y-1">
+                              <div className="text-[10px] text-slate-400 uppercase tracking-wide font-semibold">Net PnL (All-Time)</div>
+                              <div className="text-[9px] text-purple-300/60">Từ vốn ban đầu ${walletBalance?.initial_balance?.toLocaleString('en-US', { minimumFractionDigits: 2 }) || '5,000.00'}</div>
+                            </div>
+                            <div className={`text-xl font-black font-mono ${(walletBalance?.wallet_balance || 0) - (walletBalance?.initial_balance || 5000) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {(walletBalance?.wallet_balance || 0) - (walletBalance?.initial_balance || 5000) >= 0 ? '+' : ''}${((walletBalance?.wallet_balance || 0) - (walletBalance?.initial_balance || 5000)).toFixed(2)}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="bg-emerald-500/10 rounded-xl p-5 border border-emerald-500/20 relative overflow-hidden mt-6">
+                          <div className="relative flex justify-between items-center">
+                            <div>
+                              <div className="text-[11px] font-black text-white uppercase tracking-widest">Hiệu Suất Hôm Nay</div>
+                              <div className="text-[8px] text-emerald-300/60 mt-0.5">Alpha Velocity</div>
+                            </div>
+                            <div className={`text-2xl font-black font-mono ${pnlToday >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {pnlToday >= 0 ? '+' : ''}${pnlToday.toFixed(2)}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-start gap-2 px-3 py-2 bg-white/5 rounded-lg">
+                        <span className="text-emerald-400 text-xs mt-0.5">ℹ️</span>
+                        <p className="text-[9px] text-slate-400 leading-relaxed uppercase tracking-tighter">
+                          Realized = Lệnh chốt | Unrealized = Đang chạy
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                  
-                  {/* Footer Note */}
-                  <div className="flex items-start gap-2 px-3 py-2.5 bg-slate-800/40 rounded-lg border border-slate-700/50">
-                    <span className="text-emerald-400 text-xs mt-0.5">ℹ️</span>
-                    <p className="text-[9px] text-slate-300 leading-relaxed">
-                      <span className="font-semibold text-emerald-300">Realized</span> = Lệnh đã chốt | <span className="font-semibold text-blue-300">Unrealized</span> = Đang chạy
-                    </p>
                   </div>
                 </div>
-                
-                {/* Animated glow effect */}
-                <div className="absolute inset-0 rounded-2xl bg-gradient-to-r from-emerald-500/0 via-emerald-500/5 to-emerald-500/0 animate-pulse pointer-events-none"></div>
-              </div>
               </>
             )}
-            
+
             <div className={`absolute bottom-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity`}>
               {stat.icon && React.cloneElement(stat.icon as React.ReactElement, { size: 60 })}
             </div>
@@ -303,7 +323,6 @@ export const OverviewPage: React.FC = () => {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
-        {/* Main Neural Performance Chart */}
         <div className="lg:col-span-12 xl:col-span-8 card glass-dark border-white/5 p-8 relative overflow-hidden group">
           <div className="relative z-1 space-y-8">
             <div className="flex justify-between items-center">
@@ -346,13 +365,10 @@ export const OverviewPage: React.FC = () => {
               </ResponsiveContainer>
             </div>
           </div>
-          {/* Subtle background glow */}
           <div className="absolute top-0 right-0 w-[50%] h-[50%] bg-blue-500/5 blur-[120px] pointer-events-none group-hover:bg-blue-500/10 transition-all"></div>
         </div>
 
-        {/* Intelligence Sidebar */}
         <div className="lg:col-span-12 xl:col-span-4 space-y-8">
-          {/* Latest Decision Card */}
           <div className="card border-blue-500/20 bg-gradient-to-br from-slate-950 to-blue-950/30 overflow-hidden relative group">
             <div className="p-8 space-y-6 relative z-1">
               <div className="flex items-center gap-3">
@@ -370,15 +386,15 @@ export const OverviewPage: React.FC = () => {
                   <div className="bg-white/5 p-5 rounded-2xl border border-white/5 italic">
                     <p className="text-sm text-slate-300 leading-relaxed font-medium">
                       <Info size={12} className="inline mr-2 text-blue-400 opacity-50" />
-                      "{latestDecision.rationale || 'AI is currently observing order flow for potential structural shifts.'}"
+                      "{latestDecision.rationale || 'AI đang quan sát dòng tiền để xác định các thay đổi cấu trúc thị trường.'}"
                     </p>
                   </div>
 
                   <div className="grid grid-cols-2 gap-4">
                     <div className="p-4 bg-slate-950/60 rounded-xl border border-white/5 text-center">
                       <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest block mb-1">Intent</span>
-                      <span className={`text-sm font-black uppercase ${latestDecision.action === 'OPEN' ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        {latestDecision.action}
+                      <span className={`text-sm font-black uppercase ${latestDecision.action === 'OPEN' ? 'text-emerald-400' : latestDecision.action === 'CLOSE' ? 'text-rose-400' : 'text-slate-400'}`}>
+                        {latestDecision.action === 'OPEN' ? 'MỞ VỊ THẾ' : latestDecision.action === 'CLOSE' ? 'ĐÓNG VỊ THẾ' : 'ĐỨNG NGOÀI'}
                       </span>
                     </div>
                     <div className="p-4 bg-slate-950/60 rounded-xl border border-white/5 text-center">
@@ -404,11 +420,8 @@ export const OverviewPage: React.FC = () => {
                 </div>
               )}
             </div>
-            {/* Corner decoration */}
-            <div className="absolute top-0 right-0 w-24 h-24 bg-blue-500/10 rounded-full blur-2xl -translate-y-12 translate-x-12"></div>
           </div>
 
-          {/* Infrastructure Health Card */}
           <div className="card glass-dark border-white/5">
             <div className="p-6 space-y-4">
               <h3 className="text-xs font-black uppercase tracking-widest text-slate-500 flex items-center gap-2">
@@ -422,19 +435,19 @@ export const OverviewPage: React.FC = () => {
                   { name: 'binance_api', status: 'checking', label: 'Binance API' },
                   { name: 'database', status: 'checking', label: 'Internal DB' }
                 ]).map((svc: any, i: number) => {
-                  const label = svc.label || (svc.name === 'market_streams' ? 'Market Streams' : 
-                                svc.name === 'risk_validator' ? 'Risk Validator' :
-                                svc.name === 'binance_api' ? 'Binance API' : 'Internal DB')
-                  const statusText = svc.status === 'healthy' ? 'Optimal' : 
-                                    svc.status === 'operational' ? 'Operational' :
-                                    svc.status === 'degraded' ? 'Degraded' :
-                                    svc.status === 'offline' ? 'Offline' : 'Checking...'
+                  const label = svc.label || (svc.name === 'market_streams' ? 'Market Streams' :
+                    svc.name === 'risk_validator' ? 'Risk Validator' :
+                      svc.name === 'binance_api' ? 'Binance API' : 'Internal DB')
+                  const statusText = svc.status === 'healthy' ? 'Optimal' :
+                    svc.status === 'operational' ? 'Operational' :
+                      svc.status === 'degraded' ? 'Degraded' :
+                        svc.status === 'offline' ? 'Offline' : 'Checking...'
                   const statusColor = svc.status === 'healthy' ? 'text-emerald-400' :
-                                     svc.status === 'operational' ? 'text-emerald-400' :
-                                     svc.status === 'degraded' ? 'text-amber-400' : 'text-rose-400'
+                    svc.status === 'operational' ? 'text-emerald-400' :
+                      svc.status === 'degraded' ? 'text-amber-400' : 'text-rose-400'
                   const glowColor = svc.status === 'healthy' || svc.status === 'operational' ? 'bg-emerald-500' :
-                                   svc.status === 'degraded' ? 'bg-amber-500' : 'bg-rose-500'
-                  
+                    svc.status === 'degraded' ? 'bg-amber-500' : 'bg-rose-500'
+
                   return (
                     <div key={i} className="flex justify-between items-center group cursor-default">
                       <span className="text-xs font-bold text-slate-400 group-hover:text-slate-200 transition-colors">{label}</span>
@@ -446,55 +459,40 @@ export const OverviewPage: React.FC = () => {
                   )
                 })}
               </div>
-              {!healthStatus && (
-                <div className="text-[10px] text-slate-500 italic">
-                  Đang tải trạng thái hệ thống...
-                </div>
-              )}
             </div>
           </div>
         </div>
       </div>
 
-      {/* Full Width Telemetry Ticker */}
       <div className="card glass-dark border-white/5 overflow-hidden">
         <div className="p-4 px-8 border-b border-white/5 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
             <h2 className="text-[11px] font-black uppercase tracking-[0.3em] text-blue-100">Luồng dữ liệu thời gian thực (Real-time Telemetry)</h2>
           </div>
-          <button className="text-[10px] font-black text-slate-500 hover:text-white uppercase transition-colors">Xóa lịch sử</button>
         </div>
         <div className="max-h-64 overflow-y-auto custom-scrollbar bg-slate-950/40">
           {events.length === 0 ? (
             <div className="py-20 text-center opacity-30 flex flex-col items-center gap-4">
               <Activity size={32} />
-              <span className="text-xs font-black uppercase tracking-widest">No signals recorded in current session</span>
+              <span className="text-xs font-black uppercase tracking-widest">No signals recorded</span>
             </div>
           ) : (
             <div className="divide-y divide-white/5">
               {events.slice(0, 50).map((event) => (
                 <div key={event.id} className="p-4 px-8 hover:bg-white/[0.03] transition-colors flex items-center justify-between gap-6 group">
                   <div className="flex items-center gap-5 flex-grow">
-                    <div className={`w-1 h-8 rounded-full ${event.level === 'error' ? 'bg-rose-500/50 shadow-[0_0_10px_#ef4444]' :
-                      event.level === 'warning' ? 'bg-amber-500/50 shadow-[0_0_10px_#f59e0b]' :
-                        'bg-blue-500/20 group-hover:bg-blue-500/50 transition-all'
-                      }`}></div>
+                    <div className={`w-1 h-8 rounded-full ${event.level === 'error' ? 'bg-rose-500/50 shadow-[0_0_100px_#ef4444]' :
+                      event.level === 'warning' ? 'bg-amber-500/50' : 'bg-blue-500/20'}`}></div>
                     <div className="space-y-0.5">
-                      <span className={`text-[8px] font-black uppercase tracking-widest ${event.level === 'error' ? 'text-rose-400' :
-                        event.level === 'warning' ? 'text-amber-400' :
-                          'text-slate-500'
-                        }`}>
-                        {event.level} // node_telemetry_{event.id.slice(0, 4)}
-                      </span>
+                      <span className="text-[8px] font-black uppercase tracking-widest text-slate-500">{event.level}</span>
                       <p className="text-sm text-slate-300 font-medium">{event.message}</p>
                     </div>
                   </div>
                   <div className="text-right">
                     <span className="text-[10px] font-black font-mono text-slate-600 block">
-                      {format(new Date(event.timestamp), 'HH:mm:ss.SSS')}
+                      {format(new Date(event.timestamp), 'HH:mm:ss')}
                     </span>
-                    <span className="text-[8px] text-slate-700 font-bold uppercase tracking-widest">Live Flow</span>
                   </div>
                 </div>
               ))}
@@ -505,4 +503,3 @@ export const OverviewPage: React.FC = () => {
     </div>
   )
 }
-

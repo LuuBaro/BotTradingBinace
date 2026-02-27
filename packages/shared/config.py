@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     mock_initial_balance: float = Field(
         default=10000.0, description="Initial mock balance in USDT"
     )
+    initial_account_balance: float = Field(
+        default=5000.0, description="Initial account balance for PnL calculation"
+    )
     mock_fill_latency_ms: int = Field(
         default=200, description="Mock order fill latency in milliseconds"
     )
@@ -55,8 +58,8 @@ class Settings(BaseSettings):
     binance_api_secret: str = Field(default="", description="Binance API secret")
     binance_testnet: bool = Field(default=True, description="Use Binance testnet")
     binance_base_url: str = Field(
-        default="https://testnet.binancefuture.com",
-        description="Binance Futures base URL",
+        default="",
+        description="Binance Futures base URL (Leave empty to use testnet flag logic)",
     )
 
     # LLM Providers (Phase 5+)

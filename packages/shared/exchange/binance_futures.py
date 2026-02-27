@@ -339,6 +339,12 @@ class BinanceFuturesClient:
         result = await self._request("GET", "/fapi/v1/allOrders", params=params, signed=True)
         return result
 
+    async def get_user_trades(self, symbol: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get user's trade history for a specific symbol"""
+        params = {"symbol": symbol, "limit": limit}
+        result = await self._request("GET", "/fapi/v1/userTrades", params=params, signed=True)
+        return result
+
     # === Market data endpoints ===
 
     async def get_ticker_price(self, symbol: str) -> Dict[str, Any]:

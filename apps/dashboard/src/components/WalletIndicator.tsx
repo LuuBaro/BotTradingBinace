@@ -7,6 +7,7 @@ export const WalletIndicator: React.FC = () => {
     const [data, setData] = useState<any>(null)
     const [loading, setLoading] = useState(true)
     const [showDetails, setShowDetails] = useState(false)
+    const [timeoutId, setTimeoutId] = useState<NodeJS.Timeout | null>(null)
 
     const token = localStorage.getItem('token') || ''
     const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token])
@@ -22,6 +23,18 @@ export const WalletIndicator: React.FC = () => {
         }
     }
 
+    const handleMouseEnter = () => {
+        if (timeoutId) clearTimeout(timeoutId)
+        setShowDetails(true)
+    }
+
+    const handleMouseLeave = () => {
+        const id = setTimeout(() => {
+            setShowDetails(false)
+        }, 400) // 400ms grace period to move mouse to popup
+        setTimeoutId(id)
+    }
+
     useEffect(() => {
         fetchBalance()
         const interval = setInterval(fetchBalance, 30000) // Update every 30s
@@ -35,11 +48,13 @@ export const WalletIndicator: React.FC = () => {
     const isProfit = (data?.pnl_24h || 0) >= 0
 
     return (
-        <div className="relative">
+        <div 
+            className="relative"
+            onMouseEnter={handleMouseEnter}
+            onMouseLeave={handleMouseLeave}
+        >
             <div
                 className="flex items-center gap-4 px-5 py-2.5 glass-dark border border-white/10 rounded-2xl cursor-pointer group hover:border-blue-500/30 transition-all shadow-lg"
-                onMouseEnter={() => setShowDetails(true)}
-                onMouseLeave={() => setShowDetails(false)}
             >
                 <div className="p-2 bg-blue-500/10 rounded-xl group-hover:scale-110 transition-transform">
                     <Wallet size={18} className="text-blue-400" />
@@ -61,6 +76,9 @@ export const WalletIndicator: React.FC = () => {
 
             {showDetails && data?.recent_trades && (
                 <div className="absolute right-0 mt-3 w-80 bg-[#0f172a] border border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.5)] rounded-3xl z-[100] overflow-hidden animate-slideUp">
+                    {/* Bridge element to allow mouse movement across the gap */}
+                    <div className="absolute -top-3 left-0 right-0 h-3 bg-transparent"></div>
+                    
                     <div className="p-5 border-b border-white/5 bg-white/[0.02]">
                         <div className="flex justify-between items-center mb-4">
                             <h3 className="text-xs font-black text-white uppercase tracking-widest flex items-center gap-2">
@@ -116,7 +134,7 @@ export const WalletIndicator: React.FC = () => {
                     </div>
 
                     <button
-                        onClick={() => window.location.href = '/trades'}
+                        onClick={() => window.location.href = '/orders'}
                         className="w-full p-4 text-[10px] font-black text-blue-400 hover:text-white hover:bg-blue-500/10 transition-all uppercase tracking-widest border-t border-white/5"
                     >
                         Xem nhật ký đầy đủ →
