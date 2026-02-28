@@ -48,7 +48,7 @@ export const WalletIndicator: React.FC = () => {
     const isProfit = (data?.pnl_24h || 0) >= 0
 
     return (
-        <div 
+        <div
             className="relative"
             onMouseEnter={handleMouseEnter}
             onMouseLeave={handleMouseLeave}
@@ -78,7 +78,7 @@ export const WalletIndicator: React.FC = () => {
                 <div className="absolute right-0 mt-3 w-80 bg-[#0f172a] border border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.5)] rounded-3xl z-[100] overflow-hidden animate-slideUp">
                     {/* Bridge element to allow mouse movement across the gap */}
                     <div className="absolute -top-3 left-0 right-0 h-3 bg-transparent"></div>
-                    
+
                     <div className="p-5 border-b border-white/5 bg-white/[0.02]">
                         <div className="flex justify-between items-center mb-4">
                             <h3 className="text-xs font-black text-white uppercase tracking-widest flex items-center gap-2">
@@ -113,7 +113,7 @@ export const WalletIndicator: React.FC = () => {
                                     <div className="flex justify-between items-start mb-1">
                                         <div className="flex items-center gap-2">
                                             <span className="text-[11px] font-black text-white font-mono">{trade.symbol}</span>
-                                            <span className={`text-[8px] px-1.5 py-0.5 rounded font-black ${trade.side === 'LONG' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                                            <span className={`text-[8px] px-1.5 py-0.5 rounded font-black ${trade.side === 'LONG' || trade.side === 'WIN' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
                                                 {trade.side}
                                             </span>
                                         </div>

@@ -126,18 +126,21 @@ export interface Event {
   id: string
   timestamp: string
   level: 'info' | 'warning' | 'error'
+  code?: string
   message: string
   details?: Record<string, any>
 }
 
 export interface EventsState {
   events: Event[]
+  setEvents: (events: Event[]) => void
   addEvent: (event: Event) => void
   clearEvents: () => void
 }
 
 export const useEventsStore = create<EventsState>((set) => ({
   events: [],
+  setEvents: (events) => set({ events: events.slice(0, 1000) }),
   addEvent: (event) =>
     set((state) => ({
       events: [event, ...state.events].slice(0, 1000), // Keep last 1000

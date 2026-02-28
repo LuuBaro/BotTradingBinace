@@ -28,12 +28,104 @@ class AIOrchestrator:
         self.llm = llm_adapter
         self.decision_count = 0
         self.error_count = 0
+        # Cache parsed trader intent so we don't re-parse every loop
+        self._cached_intent: Optional[Dict[str, Any]] = None
+        self._cached_intent_hash: Optional[str] = None
+
+    async def parse_trader_intent(self, trader_context: str) -> Dict[str, Any]:
+        """
+        Use LLM to intelligently parse the trader's natural language prompt
+        and extract structured trading parameters that the system can act on.
+        
+        This is the core intelligence layer - AI reads the trader's intent
+        just like two humans talking, then converts it into structured rules
+        the system can use for proactive monitoring and decision-making.
+        
+        Returns a dict with extracted parameters, e.g.:
+        {
+          "profit_target_usd": 2.0,
+          "max_loss_usd": null,
+          "max_loss_pct": 0.75,
+          "max_hold_minutes": null,
+          "min_win_rate_pct": 80,
+          "preferred_timeframes": ["5m", "15m"],
+          "capital_usd": 200,
+          "strategy_summary": "Short-term mean reversion, fixed $2 profit target per trade",
+          "exit_conditions": ["profit >= $2", "stop loss hit", "trend reversal"],
+          "notes": "Fee-aware: use STOP_LIMIT for cheaper fees"
+        }
+        """
+        import hashlib
+        context_hash = hashlib.md5(trader_context.encode()).hexdigest()
+        
+        # Return cached result if same context
+        if self._cached_intent and self._cached_intent_hash == context_hash:
+            return self._cached_intent
+        
+        parse_prompt = f"""You are a trading strategy analyst. A trader has written their trading strategy in natural language.
+Your job is to READ and UNDERSTAND exactly what the trader wants, then extract structured parameters.
+
+Think like you are having a conversation with the trader and understanding their goals.
+Extract the key trading parameters from their description.
+
+## Trader's Strategy Description:
+---
+{trader_context}
+---
+
+Extract the following parameters from the trader's description. 
+IMPORTANT: 
+- "Lợi nhuận 2$/lệnh" means profit_target_usd = 2.0. 
+- "Cắt lỗ 5$/lệnh" means max_loss_usd = 5.0.
+- If a parameter is not mentioned, set it to null.
+- Think carefully about implied meaning from the trader's context.
+
+Respond with ONLY valid JSON (no markdown):
+{{
+  "profit_target_usd": <number or null>,
+  "profit_target_pct": <number or null, e.g. 0.02 = 2%>,
+  "max_loss_usd": <number or null>,
+  "max_loss_pct": <number or null>,
+  "capital_usd": <number or null>,
+  "leverage_min": <number or null>,
+  "leverage_max": <number or null>,
+  "max_hold_minutes": <number or null>,
+  "min_win_rate_pct": <number or null, e.g. 80 means 80% win rate target>,
+  "preferred_timeframes": <list of strings like ["5m","15m"] or null>,
+  "entry_style": <"scalp"|"swing"|"mean_reversion"|"breakout" or null>,
+  "exit_style": <"fixed_profit"|"trailing"|"tp_sl"|"time_based" or null>,
+  "fee_aware": <true|false>,
+  "strategy_summary": "<one sentence summary of the trader's strategy>",
+  "exit_conditions": ["<condition 1>", "<condition 2>"],
+  "key_rules": ["<rule 1>", "<rule 2>"]
+}}
+"""
+        try:
+            raw = await self.llm.generate(parse_prompt)
+            # Parse response
+            if "```json" in raw:
+                raw = raw.split("```json")[1].split("```")[0].strip()
+            elif "```" in raw:
+                raw = raw.split("```")[1].split("```")[0].strip()
+            intent = json.loads(raw)
+            self._cached_intent = intent
+            self._cached_intent_hash = context_hash
+            logger.info(
+                "trader_intent_parsed",
+                profit_target_usd=intent.get("profit_target_usd"),
+                strategy=intent.get("strategy_summary", "unknown")
+            )
+            return intent
+        except Exception as e:
+            logger.warning(f"Failed to parse trader intent: {e}. Using empty intent.")
+            return {}
 
     async def make_decision(
         self,
         market_snapshot: Dict[str, Any],
         prompt_pack: PromptPackSchema,
-        current_positions: Optional[List[Dict[str, Any]]] = None
+        current_positions: Optional[List[Dict[str, Any]]] = None,
+        trader_context: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Make trading decision based on market snapshot and prompt pack
@@ -42,6 +134,7 @@ class AIOrchestrator:
             market_snapshot: Current market data (ohlcv, indicators, spreads, funding)
             prompt_pack: Trader-defined trading rules
             current_positions: List of current open positions
+            trader_context: Optional historical context/expertise from trader
             
         Returns:
             {
@@ -62,7 +155,13 @@ class AIOrchestrator:
             if not prompt_pack or not prompt_pack.active:
                 return self._error_response("Prompt pack not active or invalid")
 
-            # Step 2: Check no-trade conditions
+            # Step 2: Parse trader intent from their natural language context
+            # This is the core intelligence: AI reads the trader's words and understands what they want
+            parsed_intent: Dict[str, Any] = {}
+            if trader_context:
+                parsed_intent = await self.parse_trader_intent(trader_context)
+
+            # Step 3: Check no-trade conditions
             no_trade_reason = self._check_no_trade_conditions(prompt_pack, market_snapshot)
             if no_trade_reason:
                 return {
@@ -76,22 +175,25 @@ class AIOrchestrator:
                     ),
                     "errors": [],
                     "raw_response": no_trade_reason,
-                    "timestamp": datetime.utcnow()
+                    "timestamp": datetime.utcnow(),
+                    "parsed_intent": parsed_intent
                 }
 
-            # Step 3: Build LLM prompt
-            prompt = self._build_prompt(market_snapshot, prompt_pack, current_positions)
+            # Step 4: Build LLM prompt - inject parsed trader intent for dynamic behavior
+            prompt = self._build_prompt(
+                market_snapshot, prompt_pack, current_positions, trader_context, parsed_intent
+            )
 
-            # Step 4: Call LLM
+            # Step 5: Call LLM
             logger.info(f"Calling LLM ({self.llm.model}) for decision")
             raw_response = await self.llm.generate(prompt)
 
-            # Step 5: Parse response
+            # Step 6: Parse response
             decision_dict = self._parse_llm_response(raw_response)
             if not decision_dict:
                 return self._error_response(f"Failed to parse LLM response: {raw_response[:200]}")
 
-            # Step 6: Validate against schema
+            # Step 7: Validate against schema
             validation_result = self._validate_decision(decision_dict, prompt_pack)
             if not validation_result.valid:
                 errors = [
@@ -103,13 +205,14 @@ class AIOrchestrator:
                     "decision": None,
                     "errors": errors,
                     "raw_response": raw_response[:500],
-                    "timestamp": datetime.utcnow()
+                    "timestamp": datetime.utcnow(),
+                    "parsed_intent": parsed_intent
                 }
 
-            # Step 7: Create AIDecisionOutput
+            # Step 8: Create AIDecisionOutput
             decision = AIDecisionOutput(**decision_dict)
 
-            # Step 8: Additional business logic validation
+            # Step 9: Additional business logic validation
             business_errors = self._validate_business_logic(decision, prompt_pack, current_positions)
             if business_errors:
                 return {
@@ -117,7 +220,8 @@ class AIOrchestrator:
                     "decision": None,
                     "errors": business_errors,
                     "raw_response": raw_response[:500],
-                    "timestamp": datetime.utcnow()
+                    "timestamp": datetime.utcnow(),
+                    "parsed_intent": parsed_intent
                 }
 
             logger.info(f"✅ Valid decision generated: {decision.decision_type} ({decision.confidence:.2%} confidence)")
@@ -127,13 +231,15 @@ class AIOrchestrator:
                 "decision": decision,
                 "errors": [],
                 "raw_response": raw_response,
-                "timestamp": datetime.utcnow()
+                "timestamp": datetime.utcnow(),
+                "parsed_intent": parsed_intent  # Worker uses this for proactive monitoring
             }
 
         except Exception as e:
             self.error_count += 1
             logger.error(f"❌ Decision generation failed: {str(e)}")
             return self._error_response(f"Exception: {str(e)}")
+
 
     def _check_no_trade_conditions(
         self,
@@ -155,82 +261,144 @@ class AIOrchestrator:
         self,
         market_snapshot: Dict[str, Any],
         prompt_pack: PromptPackSchema,
-        current_positions: Optional[List[Dict[str, Any]]] = None
+        current_positions: Optional[List[Dict[str, Any]]] = None,
+        trader_context: Optional[str] = None,
+        parsed_intent: Optional[Dict[str, Any]] = None
     ) -> str:
-        """Build LLM prompt with market snapshot and trading rules"""
+        """Build LLM prompt with market snapshot, trading rules and dynamically parsed trader intent"""
 
         # Build summary from prompt pack
         summary = self._build_prompt_pack_summary(prompt_pack)
 
         # Format market snapshot
-        market_str = json.dumps(market_snapshot, indent=2)
+        market_str = self._serialize_json(market_snapshot)
 
         # Format current positions if any
         positions_str = "No open positions"
         if current_positions:
-            positions_str = json.dumps(current_positions, indent=2)
+            positions_str = self._serialize_json(current_positions)
 
-        prompt = f"""You are a professional trading AI making real-time trading decisions.
+        # Build dynamic exit rules section from parsed trader intent
+        intent_section = ""
+        if parsed_intent:
+            profit_target = parsed_intent.get("profit_target_usd")
+            exit_conditions = parsed_intent.get("exit_conditions", [])
+            key_rules = parsed_intent.get("key_rules", [])
+            strategy_summary = parsed_intent.get("strategy_summary", "")
+            max_hold = parsed_intent.get("max_hold_minutes")
+            max_loss = parsed_intent.get("max_loss_usd")
+            capital = parsed_intent.get("capital_usd")
 
-## Your Task
-Analyze the market and decide whether to:
-1. ENTRY: Open a new position
-2. EXIT: Close an existing position
-3. MODIFY: Adjust an existing position
-4. NO_TRADE: Wait for better setup
+            intent_lines = []
+            if strategy_summary:
+                intent_lines.append(f"**Strategy understood:** {strategy_summary}")
+            if capital:
+                intent_lines.append(f"**Trading capital:** ${capital}")
+            if profit_target is not None:
+                intent_lines.append(f"**Profit target per trade:** ${profit_target} USD → EXIT immediately when reached")
+            if max_loss is not None:
+                intent_lines.append(f"**Max loss per trade:** ${max_loss} USD → EXIT immediately if loss exceeds this")
+            if max_hold is not None:
+                intent_lines.append(f"**Max hold time:** {max_hold} minutes → EXIT if position open longer")
+            if exit_conditions:
+                intent_lines.append("**Trader-defined exit conditions:**")
+                for cond in exit_conditions:
+                    intent_lines.append(f"  - {cond}")
+            if key_rules:
+                intent_lines.append("**Key trading rules:**")
+                for rule in key_rules:
+                    intent_lines.append(f"  - {rule}")
 
-ALL responses must be valid JSON matching the schema below.
+            if intent_lines:
+                intent_section = "## ⚡ PARSED TRADER INTENT (extracted from trader's own words)\n" + "\n".join(intent_lines) + "\n"
 
-## Trading Rules (from Prompt Pack)
+        # Build dynamic exit rule for the STRICT RULES section
+        profit_target_rule = ""
+        if parsed_intent and parsed_intent.get("profit_target_usd") is not None:
+            pt = parsed_intent["profit_target_usd"]
+            profit_target_rule = f"2. **EXIT MANDATORY if unrealized_pnl_usd >= {pt} (trader's profit target)**"
+        else:
+            profit_target_rule = "2. **EXIT if profit target from trader's strategy is reached (check strategy context)**"
+
+        prompt = f"""You are a professional trading AI executing a trader's strategy in real-time.
+Your job is to UNDERSTAND the trader's strategy (written below in their own words) and act exactly as they intended.
+
+{f"## Trader's Full Strategy Context" if trader_context else ""}
+{trader_context if trader_context else ""}
+
+{intent_section}
+## HOW TO THINK (priority order - ALWAYS follow this):
+
+### 🔴 PRIORITY 1 — MANAGE OPEN POSITIONS FIRST
+If there are open positions below, YOU MUST evaluate them BEFORE anything else:
+- Compare `unrealized_pnl_usd` against the trader's profit target
+- Compare current price against `take_profit` and `stop_loss` levels  
+- Consider how long the position has been open (`opened_at`)
+- **If the trader's profit target is met → EXIT NOW. Do not hesitate.**
+- **If stop loss hit → EXIT NOW.**
+- Do NOT open more positions for the same symbol if one is already open.
+
+### 🟡 PRIORITY 2 — NEW ENTRY (only if no position for this symbol)
+Only propose a new ENTRY if there is no open position for this symbol AND market conditions match the trader's strategy.  
+Calculate exact entry_price, stop_loss_price, take_profit_prices that would meet the trader's profit target (accounting for fees if fee_aware is true).
+
+### 🟢 PRIORITY 3 — NO_TRADE  
+Return NO_TRADE if conditions are unclear, risky, or don't match the strategy.
+
+## Trading Ruleset (Prompt Pack)
 {summary.to_prompt()}
 
-## Current Market Snapshot
+## Current Market Data
 ```json
 {market_str}
 ```
 
-## Current Open Positions
+## Open Positions — CHECK THESE FIRST
 ```json
 {positions_str}
 ```
 
-## Decision Schema (respond with ONLY valid JSON)
+## Response Format (valid JSON only, no markdown):
 {{
   "decision_type": "ENTRY|EXIT|MODIFY|NO_TRADE",
   "confidence": 0.0-1.0,
-  "rationale": "explanation",
-  "market_regime": "identified regime name",
-  "timeframe_analysis": {{"15m": "...", "1h": "...", "4h": "..."}},
+  "rationale": "Explain your decision. If position open, mention its current PnL vs target.",
+  "market_regime": "Trending Up|Trending Down|Range Bound|Sideways|Volatile",
+  "timeframe_analysis": {{"5m": "...", "15m": "...", "1h": "..."}},
   "order_spec": {{
-    "symbol": "ETHUSDT",
+    "symbol": "BTCUSDT",
     "side": "BUY|SELL",
-    "quantity": 10.0,
-    "entry_price": 2500.0,
-    "stop_loss_price": 2450.0,
-    "take_profit_prices": [2550.0, 2600.0],
-    "leverage": 1.0-{prompt_pack.risk_params.max_leverage}
+    "quantity": 0.001,
+    "entry_price": 65000.0,
+    "stop_loss_price": 64500.0,
+    "take_profit_prices": [65200.0],
+    "leverage": 5.0
   }},
   "checklist_results": [
-    {{"name": "...", "passed": true|false, "reason": "..."}}
+    {{"name": "Profit target check", "passed": true, "reason": "PnL $2.3 >= target $2.0"}}
   ],
   "risk_assessment": {{
     "risk_reward_ratio": 2.0,
     "position_pct": 5.0,
-    "daily_loss_pct": 0.5
+    "expected_profit_usd": 2.0
   }}
 }}
 
-IMPORTANT RULES:
-1. Respond ONLY with valid JSON, no markdown or explanations
-2. Confidence must be >= {prompt_pack.min_analysis_confidence} to propose trade
-3. Risk/reward ratio must be >= {prompt_pack.risk_params.min_risk_ratio}
-4. Position size must be <= {prompt_pack.risk_params.max_position_pct}%
-5. Leverage must be <= {prompt_pack.risk_params.max_leverage}x
-6. All checklist items must pass if marked required
-7. If uncertain, return NO_TRADE
+STRICT EXECUTION RULES:
+1. Respond with ONLY valid JSON — no explanations, no markdown
+{profit_target_rule}
+3. **EXIT MANDATORY if price crossed take_profit level**
+4. **EXIT MANDATORY if price crossed stop_loss level**
+5. For ENTRY: calculate TP price that achieves trader's exact profit target (after fees)
+6. Confidence >= {prompt_pack.min_analysis_confidence} required for ENTRY
+7. Risk/reward >= {prompt_pack.risk_params.min_risk_ratio}
+8. Position size <= {prompt_pack.risk_params.max_position_pct}%
+9. Leverage <= {prompt_pack.risk_params.max_leverage}x
+10. For EXIT, order_spec can be null (system handles execution)
 """
 
         return prompt
+
 
     def _build_prompt_pack_summary(self, prompt_pack: PromptPackSchema) -> PromptPackSummary:
         """Convert prompt pack to concise summary for LLM"""
@@ -428,6 +596,15 @@ IMPORTANT RULES:
             "raw_response": "",
             "timestamp": datetime.utcnow()
         }
+
+    def _serialize_json(self, data: Any) -> str:
+        """Helper to serialize dict with datetime and other complex types"""
+        def default(obj):
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            return str(obj)
+            
+        return json.dumps(data, indent=2, default=default)
 
     def get_stats(self) -> Dict[str, Any]:
         """Get orchestrator statistics"""

@@ -216,6 +216,16 @@ class BinanceFuturesClient:
         result = await self._request("GET", "/fapi/v2/positionRisk", params=params, signed=True)
         return result
 
+    async def get_user_trades(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Fetch recent REALIZED_PNL events (which map directly to closed positions) across ALL symbols"""
+        params = {"incomeType": "REALIZED_PNL", "limit": limit}
+        try:
+            result = await self._request("GET", "/fapi/v1/income", params=params, signed=True)
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to fetch binance income for trades: {e}")
+            return []
+
     # === Order endpoints ===
 
     async def place_order(

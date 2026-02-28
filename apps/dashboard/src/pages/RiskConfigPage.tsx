@@ -1,11 +1,12 @@
 import React, { useEffect, useState, useMemo } from 'react'
-import { useConfigStore } from '../store'
+import { useConfigStore, useAuthStore } from '../store'
 import { createApiClient, getApiBaseUrl } from '../api/client'
 import { Save, RotateCcw, History, AlertTriangle, CheckCircle2, Cpu, Lock, Terminal, ShieldCheck, ChevronRight, Info } from 'lucide-react'
 import { format } from 'date-fns'
 
 export const RiskConfigPage: React.FC = () => {
   const { currentConfig, setConfig, versions, setVersions } = useConfigStore()
+  const { user } = useAuthStore()
   const [editedConfig, setEditedConfig] = useState<any>(null)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
@@ -94,7 +95,9 @@ export const RiskConfigPage: React.FC = () => {
             </div>
             <div>
               <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest block">Access Level</span>
-              <span className="text-xs font-black text-white uppercase font-mono">ENCRYPTED_AUTH_LVL_0</span>
+              <span className="text-xs font-black text-white uppercase font-mono">
+                {user?.role === 'admin' ? 'SECURE_ADMIN_ACCESS_LVL_1' : 'RESTRICTED_ACCESS_LVL_0'}
+              </span>
             </div>
           </div>
         </div>
@@ -159,7 +162,7 @@ export const RiskConfigPage: React.FC = () => {
                       <div key={key} className="space-y-3 group">
                         <div className="flex justify-between items-center px-1">
                           <div className="relative group/tooltip">
-                            <label 
+                            <label
                               className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] group-focus-within:text-blue-400 transition-colors flex items-center gap-2 cursor-help"
                             >
                               {displayKey}
@@ -203,7 +206,7 @@ export const RiskConfigPage: React.FC = () => {
                             className="w-full bg-slate-950/50 border border-white/5 py-3 px-5 rounded-2xl text-white font-bold font-mono focus:border-blue-500/50 focus:ring-4 focus:ring-blue-500/10 outline-none transition-all group-hover:bg-slate-900/50 text-sm [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                             step={typeof value === 'number' && Math.abs(value) < 1 ? '0.01' : '1'}
                           />
-                          <div 
+                          <div
                             className="absolute right-4 top-1/2 -translate-y-1/2 opacity-30 text-[10px] font-black uppercase pointer-events-none"
                             title={fieldMeta.desc}
                           >

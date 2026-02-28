@@ -92,3 +92,9 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 async def close_db() -> None:
     """Close database connection pool"""
     await engine.dispose()
+
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """Dependency for FastAPI routes"""
+    async with AsyncSessionFactory() as session:
+        yield session

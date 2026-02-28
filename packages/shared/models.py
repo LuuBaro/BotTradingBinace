@@ -271,3 +271,30 @@ class TraderContext(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     trader_name: Mapped[str] = mapped_column(String(100), nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class NewsSource(Base):
+    """Custom intelligence sources (RSS, Telegram, Web)"""
+
+    __tablename__ = "news_sources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    url: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    source_type: Mapped[str] = mapped_column(String(20), nullable=False)  # rss|telegram|web
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_scraped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class NewsLog(Base):
+    """Scraped news content for AI analysis"""
+
+    __tablename__ = "news_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id: Mapped[int] = mapped_column(Integer, ForeignKey("news_sources.id"))
+    title: Mapped[str] = mapped_column(String(255), nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)

@@ -1,16 +1,22 @@
 """
 Phase 6 API Routes - Learning Agent and Trade Journal
 """
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
-from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Depends
+from typing import List, Optional, Dict, Any, AsyncGenerator
 from datetime import datetime, timedelta
 import logging
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.shared.trade_journal import TradeJournalEntry, ExitReason
 from packages.shared.learning_agent import LearningAgent, SuggestedAdaptations
-from packages.shared.database import AsyncSessionFactory
+from packages.shared.database import AsyncSessionFactory, get_db
 from packages.shared.models import TradeJournal as TradeJournalModel, TraderContext
 from sqlalchemy import select, desc
+import aiohttp
+import asyncio
+from datetime import timezone
+from packages.shared.exchange.binance_futures import BinanceFuturesClient
+from packages.shared.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -539,12 +545,108 @@ async def get_current_adaptations() -> Dict[str, Any]:
     }
 
 
+async def _fetch_historical_trades_from_binance(db_session: AsyncSession, limit: int = 50) -> int:
+    """
+    Sync recent Binance fills into the permanent Trade Journal.
+    Returns the number of new entries added.
+    """
+    if not (settings.binance_api_key and settings.binance_api_secret):
+        logger.warning("Binance keys missing, skipping history sync")
+        return 0
+        
+    try:
+        # Get active symbols from BotConfig or fallback
+        symbols = ["BTCUSDT", "ETHUSDT", "LINKUSDT", "XRPUSDT", "SOLUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "UNIUSDT", "DOGEUSDT"]
+        try:
+            from packages.shared.models import BotConfig
+            bot_res = await db_session.execute(select(BotConfig).where(BotConfig.is_active == True))
+            bot_config = bot_res.scalar_one_or_none()
+            if bot_config and bot_config.symbols_json:
+                if isinstance(bot_config.symbols_json, list):
+                    symbols = list(set(symbols + bot_config.symbols_json))
+                elif isinstance(bot_config.symbols_json, dict):
+                    symbols = list(set(symbols + bot_config.symbols_json.get("symbols", [])))
+        except Exception:
+            pass
+
+        client = BinanceFuturesClient()
+        connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+        async with aiohttp.ClientSession(connector=connector) as session:
+            client.session = session
+            await client.sync_server_time()
+            
+            # Parallel fetch recent fills
+            tasks = [client.get_user_trades(s, limit=limit) for s in symbols]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            new_count = 0
+            for i, res in enumerate(results):
+                symbol = symbols[i]
+                if not isinstance(res, list): continue
+                
+                for t in res:
+                    # Filter for closing trades (realizedPnl != 0)
+                    rpnl = float(t.get('realizedPnl', 0))
+                    if abs(rpnl) > 1e-8:
+                        trade_id = str(t.get('id'))
+                        trace_id = f"bin_sync_{trade_id}"
+                        
+                        # Check if already exists
+                        existing = await db_session.execute(
+                            select(TradeJournalModel).where(TradeJournalModel.trace_id == trace_id)
+                        )
+                        if existing.scalar_one_or_none():
+                            continue
+                            
+                        dt = datetime.fromtimestamp(t.get('time', 0)/1000, tz=timezone.utc).replace(tzinfo=None)
+                        qty = float(t.get('qty', 0))
+                        price = float(t.get('price', 0))
+                        
+                        # Create Journal Record
+                        journal_entry = TradeJournalModel(
+                            trace_id=trace_id,
+                            symbol=symbol,
+                            side=t.get('side'),
+                            entry_price=price, # Approximation for sync
+                            exit_price=price,
+                            pnl=rpnl,
+                            rr=1.0,
+                            holding_time=300, # 5 min default for sync
+                            regime="Historical Sync",
+                            exit_reason=ExitReason.MANUAL.value,
+                            closed_at=dt,
+                            decision_json={},
+                            features_json={
+                                "entry_time": (dt - timedelta(minutes=5)).isoformat(),
+                                "exit_time": dt.isoformat(),
+                                "entry_quantity": qty,
+                                "entry_leverage": 1.0,
+                                "pnl_pct": 0.0,
+                                "ai_model": "binance_sync",
+                                "confidence": 1.0
+                            }
+                        )
+                        db_session.add(journal_entry)
+                        new_count += 1
+            
+            if new_count > 0:
+                await db_session.commit()
+                logger.info(f"✅ Synced {new_count} historical trades from Binance into DB")
+            return new_count
+            
+    except Exception as e:
+        logger.error(f"❌ Historical sync failed: {e}")
+        return 0
+
+
 # ============================================================================
 # Dashboard Metrics
 # ============================================================================
 
 @router.get("/learning/dashboard-metrics")
-async def get_dashboard_learning_metrics() -> Dict[str, Any]:
+async def get_dashboard_learning_metrics(
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, Any]:
     """
     Get learning metrics for dashboard display
     
@@ -553,9 +655,28 @@ async def get_dashboard_learning_metrics() -> Dict[str, Any]:
     """
     try:
         from packages.shared.market_intelligence import intelligence_aggregator
-        market_intel = intelligence_aggregator.get_market_context()
+        from packages.shared.models import Decision
+        
+        # 1. Fetch latest market snapshots from recent decisions
+        snapshots_result = await db.execute(
+            select(Decision.market_snapshot).where(Decision.market_snapshot != None).order_by(desc(Decision.timestamp)).limit(5)
+        )
+        recent_snapshots = snapshots_result.scalars().all()
+        
+        # 2. Market Context via Aggregator
+        market_intel = await intelligence_aggregator.get_market_context(recent_snapshots)
         
         agent = await _get_learning_agent_from_db()
+        
+        # 3. Fallback to Binance history if local DB is empty
+        if not agent.trades or len(agent.trades) < 5:
+            logger.info("Insufficient trades in DB, syncing from Binance for analysis...")
+            async with AsyncSessionFactory() as db_session:
+                new_trades = await _fetch_historical_trades_from_binance(db_session, limit=100)
+                if new_trades > 0:
+                    # Reload agent to include new trades
+                    agent = await _get_learning_agent_from_db()
+                
         if not agent.trades or len(agent.trades) < 5:
             return {
                 "status": "insufficient_data",
@@ -569,7 +690,7 @@ async def get_dashboard_learning_metrics() -> Dict[str, Any]:
         return {
             "status": "success",
             "trades_analyzed": report.trades_analyzed,
-            "analysis_time": report.analysis_time.isoformat() + "Z",
+            "analysis_time": datetime.utcnow().isoformat() + "Z", # Always show current time for freshness
             "stats": report.stats.dict() if report.stats else None,
             "key_metrics": {
                 "win_rate": f"{report.stats.win_rate:.1%}" if report.stats else "N/A",
@@ -1336,4 +1457,71 @@ async def import_trader_context(
         
     except Exception as e:
         logger.error(f"❌ Trader context import failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# === Intelligence Management (Custom Sources) ===
+
+@router.get("/intelligence/sources")
+async def get_news_sources(db: AsyncSession = Depends(get_db)):
+    """List all registered news sources"""
+    try:
+        from packages.shared.models import NewsSource
+        result = await db.execute(select(NewsSource))
+        return result.scalars().all()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/intelligence/sources")
+async def add_news_source(payload: Dict[str, Any], db: AsyncSession = Depends(get_db)):
+    """Add a new custom news/telegram source"""
+    try:
+        from packages.shared.models import NewsSource
+        name = payload.get("name")
+        url = payload.get("url")
+        source_type = payload.get("source_type", "web") # rss|telegram|web
+        
+        if not name or not url:
+            raise HTTPException(status_code=400, detail="name and url are required")
+            
+        new_source = NewsSource(
+            name=name,
+            url=url,
+            source_type=source_type,
+            is_active=True
+        )
+        db.add(new_source)
+        await db.commit()
+        return {"success": True, "source_id": new_source.id}
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/intelligence/sources/{source_id}")
+async def delete_news_source(source_id: int, db: AsyncSession = Depends(get_db)):
+    """Remove a news source"""
+    try:
+        from packages.shared.models import NewsSource
+        result = await db.execute(select(NewsSource).where(NewsSource.id == source_id))
+        source = result.scalar_one_or_none()
+        if source:
+            await db.delete(source)
+            await db.commit()
+            return {"success": True}
+        raise HTTPException(status_code=404, detail="Source not found")
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/intelligence/scrape-now")
+async def trigger_manual_scrape():
+    """Trigger an immediate scrape of all sources"""
+    try:
+        from packages.shared.market_intelligence import intelligence_aggregator
+        await intelligence_aggregator.scraper.scrape_all()
+        return {"success": True, "message": "Scraping cycle initiated"}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -47,7 +47,7 @@ export const TradesPage: React.FC = () => {
     const s = (status || 'unknown').toLowerCase()
     if (s === 'executed' || s === 'approved' || s === 'approved_manually') return 'badge-success'
     if (s === 'rejected' || s === 'failed') return 'badge-danger'
-    if (s === 'pending' || s === 'awaiting_approval') return 'badge-info'
+    if (s === 'pending' || s === 'awaiting_approval' || s === 'observing') return 'badge-info'
     return 'badge-secondary'
   }
 
@@ -113,8 +113,8 @@ export const TradesPage: React.FC = () => {
                         <td className="font-black font-mono text-blue-100 italic">{trade.symbol}</td>
                         <td className="relative">
                           <span className={`text-[10px] font-black uppercase tracking-widest flex items-center gap-2 ${trade.status === 'REJECTED' ? 'text-rose-500' :
-                              trade.action === 'OPEN' ? 'text-emerald-400' :
-                                trade.action === 'CLOSE' ? 'text-rose-400' : 'text-slate-400'
+                            trade.action === 'OPEN' ? 'text-emerald-400' :
+                              trade.action === 'CLOSE' ? 'text-rose-400' : 'text-slate-400'
                             }`}>
                             {trade.action === 'OPEN' && trade.status !== 'REJECTED' ? <Zap size={10} className="fill-current" /> : null}
                             {trade.status === 'REJECTED' ? 'BỊ TỪ CHỐI' :
@@ -266,7 +266,7 @@ export const TradesPage: React.FC = () => {
                         <span className="text-sm font-black uppercase tracking-tight">Risk Guard: {traceDetails.decision.risk_passed ? 'APPROVED' : 'REJECTED'}</span>
                       </div>
                       <div className="bg-slate-950/40 p-4 rounded-xl text-xs font-mono text-slate-400 border border-white/5">
-                        {traceDetails.decision.risk_approval_reason || 'NO_AUDIT_LOG_ENTRY_FOUND'}
+                        {traceDetails.decision.risk_approval_reason || 'SYSTEM: Không có báo cáo chi tiết từ Risk Guard cho lượt quét này.'}
                       </div>
                     </div>
 

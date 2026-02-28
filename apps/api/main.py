@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from packages.shared.config import settings
-from packages.shared.database import AsyncSessionFactory, init_db, close_db
+from packages.shared.database import AsyncSessionFactory, init_db, close_db, get_db
 from packages.shared.models import (
     BotConfig,
     Event,
@@ -73,7 +73,7 @@ async def poll_and_broadcast_events():
                 for event in new_events:
                     event_data = {
                         "id": event.id,
-                        "timestamp": event.timestamp.isoformat(),
+                        "timestamp": event.timestamp.isoformat() + "Z" if not event.timestamp.tzinfo else event.timestamp.isoformat(),
                         "level": event.level.lower(),
                         "code": event.code,
                         "message": event.message,
@@ -109,10 +109,7 @@ app.include_router(phase4_router, prefix="/api")
 app.include_router(phase6_router, prefix="/api")
 
 
-# Dependency to get database session
-async def get_db() -> AsyncSession:
-    async with AsyncSessionFactory() as session:
-        yield session
+#Dependency imported from packages.shared.database
 
 
 # Endpoints consolidated in phase4_routes.py
@@ -257,14 +254,18 @@ async def get_reconciliation_summary():
     """Get last reconciliation summary"""
     if not recon_state["last_summary"]:
         return {
-            "status": "no_reconciliation_yet",
-            "message": "No reconciliation has been performed yet",
+            "total_mismatches": 0,
+            "position_mismatches": 0,
+            "last_sync": datetime.utcnow().isoformat(),
+            "status": "SYNCHRONIZED"
         }
     
+    summary = recon_state["last_summary"]
     return {
-        "status": "success",
-        "summary": recon_state["last_summary"],
-        "last_reconcile_at": recon_state["last_reconcile_at"],
+        "total_mismatches": summary.get("total_mismatches", 0),
+        "position_mismatches": summary.get("position_mismatches", 0),
+        "last_sync": recon_state["last_reconcile_at"],
+        "status": "SYNCHRONIZED" if summary.get("total_mismatches", 0) == 0 else "MISMATCH"
     }
 
 
@@ -362,7 +363,7 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        "main:app",
+        "apps.api.main:app",
         host=settings.api_host,
         port=settings.api_port,
         reload=True,

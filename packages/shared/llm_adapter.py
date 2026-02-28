@@ -44,7 +44,7 @@ class OpenAIAdapter(LLMAdapter):
         if not api_key:
             raise ValueError("OPENAI_API_KEY not set")
         super().__init__(api_key, model, temperature, max_tokens)
-        self.base_url = "https://api.openai.com/v1"
+        self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
     async def generate(self, prompt: str) -> str:
         """Generate response using OpenAI API"""
@@ -188,6 +188,44 @@ class ClaudeAdapter(LLMAdapter):
             return False
 
 
+class GroqAdapter(OpenAIAdapter):
+    """Groq API adapter (OpenAI compatible)"""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "llama-3.1-8b-instant",
+        temperature: float = 0.3,
+        max_tokens: int = 2000
+    ):
+        api_key = api_key or os.getenv("GROQ_API_KEY")
+        if not api_key:
+            # Fallback to OpenAI key if starts with gsk_
+            openai_key = os.getenv("OPENAI_API_KEY")
+            if openai_key and openai_key.startswith("gsk_"):
+                api_key = openai_key
+            else:
+                raise ValueError("GROQ_API_KEY not set")
+        
+        super().__init__(api_key, model, temperature, max_tokens)
+        self.base_url = "https://api.groq.com/openai/v1"
+
+
+class LocalLLMAdapter(OpenAIAdapter):
+    """Local LLM adapter (OpenAI compatible, e.g. Ollama, LM Studio)"""
+
+    def __init__(
+        self,
+        api_key: str = "not-needed",
+        model: str = "local-model",
+        temperature: float = 0.3,
+        max_tokens: int = 2000,
+        base_url: str = "http://localhost:1234/v1"
+    ):
+        super().__init__(api_key, model, temperature, max_tokens)
+        self.base_url = os.getenv("LOCAL_LLM_BASE_URL", base_url)
+
+
 class MockLLMAdapter(LLMAdapter):
     """Mock adapter for testing (always returns valid decision JSON)"""
 
@@ -244,10 +282,21 @@ def get_llm_adapter(
     provider = provider.lower()
 
     if provider == "openai":
+        if api_key and api_key.startswith("gsk_"):
+            # Auto-correct model name if it's an OpenAI default
+            effective_model = model if model and "gpt" not in model.lower() else "llama-3.1-8b-instant"
+            return GroqAdapter(api_key, effective_model, temperature, max_tokens)
         return OpenAIAdapter(api_key, model or "gpt-4-turbo", temperature, max_tokens)
-    elif provider == "claude":
+    elif provider == "claude" or provider == "anthropic":
         return ClaudeAdapter(api_key, model or "claude-3-opus-20240229", temperature, max_tokens)
+    elif provider == "groq":
+        return GroqAdapter(api_key, model or "llama-3.1-8b-instant", temperature, max_tokens)
+    elif provider == "local":
+        return LocalLLMAdapter(api_key or "not-needed", model or "local-model", temperature, max_tokens)
     elif provider == "mock":
         return MockLLMAdapter()
     else:
+        # Auto-detect Groq key
+        if api_key and api_key.startswith("gsk_"):
+            return GroqAdapter(api_key, model or "mixtral-8x7b-32768", temperature, max_tokens)
         raise ValueError(f"Unknown LLM provider: {provider}")

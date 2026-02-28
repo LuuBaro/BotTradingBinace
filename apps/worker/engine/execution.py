@@ -710,7 +710,7 @@ class ExecutionEngine:
                 "max_runup": 0.0,
             },
             decision_json=decision.model_dump(),
-            exit_reason=ExitReason.MANUAL.value,
+            exit_reason=str(decision.decision_type.value) if hasattr(decision.decision_type, 'value') else str(decision.decision_type or ExitReason.MANUAL.value),
             closed_at=exit_time,
         )
         session.add(trade)

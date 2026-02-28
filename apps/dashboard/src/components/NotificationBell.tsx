@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react'
-import { Bell, Brain, AlertTriangle, Shield, X, ChevronRight, Clock, Target, Zap, Waves } from 'lucide-react'
+import { Bell, Brain, AlertTriangle, Shield, X, ChevronRight, Clock, Target, Zap, Waves, ExternalLink } from 'lucide-react'
 import { createApiClient, getApiBaseUrl } from '../api/client'
 import { format } from 'date-fns'
 import { vi } from 'date-fns/locale'
@@ -10,6 +10,7 @@ export const NotificationBell: React.FC = () => {
     const [loading, setLoading] = useState(false)
     const [unread, setUnread] = useState(false)
     const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
+    const [expandedNewsIdx, setExpandedNewsIdx] = useState<number | null>(null)
 
     const token = localStorage.getItem('token') || ''
     const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token])
@@ -145,15 +146,54 @@ export const NotificationBell: React.FC = () => {
                                         <div className="space-y-4 animate-fadeIn">
                                             {/* News Headlines */}
                                             <div className="space-y-2">
-                                                <div className="flex items-center gap-2">
-                                                    <Clock size={12} className="text-slate-500" />
-                                                    <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Tin tức thị trường (Real-time News)</span>
+                                                <div className="flex items-center justify-between">
+                                                    <div className="flex items-center gap-2">
+                                                        <Clock size={12} className="text-slate-500" />
+                                                        <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Tin tức thị trường (Real-time News)</span>
+                                                    </div>
+                                                    <button
+                                                        onClick={() => { toggle(); window.location.hash = '#/settings'; }}
+                                                        className="text-[8px] font-black text-blue-500/60 hover:text-blue-400 uppercase tracking-tighter transition-colors"
+                                                    >
+                                                        Cài đặt nguồn tin (Sources)
+                                                    </button>
                                                 </div>
-                                                <div className="space-y-2">
-                                                    {report.market_intelligence.headlines.map((news: string, i: number) => (
-                                                        <div key={i} className="p-3 bg-white/[0.02] border border-white/5 rounded-xl flex items-start gap-2 hover:bg-white/5 transition-colors">
-                                                            <div className="w-1.5 h-1.5 rounded-full bg-blue-500 mt-1.5 shrink-0"></div>
-                                                            <p className="text-[11px] text-slate-300 leading-snug">{news}</p>
+                                                <div className="space-y-3">
+                                                    {report.market_intelligence.headlines.map((news: any, i: number) => (
+                                                        <div key={i} className="group">
+                                                            <div
+                                                                onClick={() => setExpandedNewsIdx(expandedNewsIdx === i ? null : i)}
+                                                                className={`p-4 bg-white/[0.02] border rounded-2xl flex items-start gap-3 cursor-pointer transition-all ${expandedNewsIdx === i ? 'border-blue-500/50 bg-blue-500/5' : 'border-white/5 hover:bg-white/5'}`}
+                                                            >
+                                                                <div className={`w-1.5 h-1.5 rounded-full bg-blue-500 mt-1.5 shrink-0 shadow-[0_0_8px_rgba(59,130,246,0.6)] ${expandedNewsIdx === i ? 'animate-pulse' : ''}`}></div>
+                                                                <div className="flex-grow space-y-1">
+                                                                    <p className={`text-[11px] font-bold leading-snug transition-colors ${expandedNewsIdx === i ? 'text-white' : 'text-slate-300'}`}>
+                                                                        {typeof news === 'string' ? news : news.title}
+                                                                    </p>
+                                                                    {typeof news !== 'string' && expandedNewsIdx !== i && (
+                                                                        <p className="text-[9px] text-slate-500 line-clamp-1">{news.content}</p>
+                                                                    )}
+                                                                </div>
+                                                                <ChevronRight size={12} className={`text-slate-600 mt-1 transition-transform ${expandedNewsIdx === i ? 'rotate-90' : ''}`} />
+                                                            </div>
+                                                            {expandedNewsIdx === i && typeof news !== 'string' && (
+                                                                <div className="mt-1 mx-2 p-4 bg-slate-900/80 border-x border-b border-white/5 rounded-b-2xl animate-slideDown overflow-hidden">
+                                                                    <p className="text-[10px] text-slate-400 leading-relaxed mb-3 whitespace-pre-wrap">
+                                                                        {news.content}
+                                                                    </p>
+                                                                    {news.url && news.url !== '#' && (
+                                                                        <a
+                                                                            href={news.url}
+                                                                            target="_blank"
+                                                                            rel="noopener noreferrer"
+                                                                            className="inline-flex items-center gap-1.5 text-[9px] font-black text-blue-400 hover:text-white transition-colors"
+                                                                        >
+                                                                            XEM NGUỒN TIN (SOURCE)
+                                                                            <ExternalLink size={10} />
+                                                                        </a>
+                                                                    )}
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     ))}
                                                 </div>

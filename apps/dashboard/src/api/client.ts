@@ -143,6 +143,11 @@ export class ApiClient {
     return res.data
   }
 
+  async getEvents(limit = 100) {
+    const res = await this.axiosInstance.get(`events?limit=${limit}`)
+    return res.data
+  }
+
   async getPnlHistory(days = 7) {
     const res = await this.axiosInstance.get(`reports/pnl-history?days=${days}`)
     return res.data
@@ -242,6 +247,22 @@ export class ApiClient {
 
   async testTelegram() {
     const res = await this.axiosInstance.post('settings/test/telegram')
+    return res.data
+  }
+
+  // Intelligence / News Sources
+  async getNewsSources() {
+    const res = await this.axiosInstance.get('intelligence/sources')
+    return res.data
+  }
+
+  async addNewsSource(payload: { name: string, url: string, source_type: string }) {
+    const res = await this.axiosInstance.post('intelligence/sources', payload)
+    return res.data
+  }
+
+  async deleteNewsSource(sourceId: number) {
+    const res = await this.axiosInstance.delete(`intelligence/sources/${sourceId}`)
     return res.data
   }
 }

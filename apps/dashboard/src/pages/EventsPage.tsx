@@ -2,10 +2,38 @@ import React, { useEffect, useState, useMemo } from 'react'
 import { useEventsStore } from '../store'
 import { createApiClient, getApiBaseUrl } from '../api/client'
 import { formatDistanceToNow, format } from 'date-fns'
-import { Terminal, History, User, List, Info, AlertOctagon, AlertTriangle, CheckCircle, Clock, Database } from 'lucide-react'
+import { Terminal, History, User, List, Info, AlertOctagon, AlertTriangle, CheckCircle, Clock, Database, Code2 } from 'lucide-react'
+
+// Map generic system logs to readable Vietnamese
+const formatSystemLog = (message: string) => {
+  if (!message) return ''
+  let text = message
+
+  // Pattern matching
+  if (text.includes('Worker active. Monitoring')) {
+    const parts = text.match(/Monitoring (\d+) symbols/)
+    const count = parts ? parts[1] : ''
+    text = `Worker Framework đang khởi chạy ở chế độ ngầm. Đang giám sát ${count} cặp giao dịch (Symbols).`
+  } else if (text.includes('Fetching historical data')) {
+    text = `Đang đồng bộ dữ liệu lịch sử nến (Klines) cho Neural Engine...`
+  } else if (text.includes('Not enough historical trades')) {
+    text = `Thiếu hụt Data mẫu trong Database. Yêu cầu nạp thêm dữ liệu để tiếp tục huấn luyện AI.`
+  } else if (text.includes('Waiting for approval')) {
+    text = `AI đã lên phương án Trade. Đang chờ xác nhận từ Quản trị viên (Manual Approval).`
+  } else if (text.includes('Order placed successfully')) {
+    text = `Bot đã đặt lệnh thành công lên sàn Binance.`
+  } else if (text.includes('Worker sleeping')) {
+    text = `Nhịp Worker tạm nghỉ chờ phiên làm việc tiếp theo.`
+  } else if (text.includes('Syncing fallback trades')) {
+    text = `Đang gọi API đồng bộ dự phòng lịch sử lệnh vào Database.`
+  }
+
+  // Common keyword bolding
+  return text
+}
 
 export const EventsPage: React.FC = () => {
-  const { events } = useEventsStore()
+  const { events, setEvents } = useEventsStore()
   const [auditLog, setAuditLog] = useState<any[]>([])
   const [filter, setFilter] = useState<'all' | 'error' | 'warning' | 'info'>('all')
   const [loading, setLoading] = useState(false)
@@ -19,8 +47,16 @@ export const EventsPage: React.FC = () => {
       try {
         const logs = await api.getAuditLog(100, 0)
         setAuditLog(logs || [])
+
+        // Populate initial events
+        if (events.length === 0) {
+          const eventsResponse = await api.getEvents(200)
+          if (eventsResponse && eventsResponse.events) {
+            setEvents(eventsResponse.events)
+          }
+        }
       } catch (error) {
-        console.error('Failed to fetch audit log:', error)
+        console.error('Failed to fetch data:', error)
       } finally {
         setLoading(false)
       }
@@ -100,17 +136,20 @@ export const EventsPage: React.FC = () => {
                       </div>
                       <div className="flex-1 space-y-1">
                         <div className="flex justify-between items-center">
-                          <span className={`text-[9px] font-black uppercase tracking-widest ${event.level.toLowerCase() === 'error' ? 'text-rose-500' :
+                          <span className={`text-[9px] font-black uppercase tracking-widest flex items-center gap-1.5 ${event.level.toLowerCase() === 'error' ? 'text-rose-500' :
                             event.level.toLowerCase() === 'warning' ? 'text-amber-500' :
                               'text-blue-500'
                             }`}>
-                            NODE_EVENT // {event.id?.slice(0, 8) || 'SYSTEM'}
+                            <Code2 size={10} className="opacity-70" />
+                            NODE_EVENT // {event.id ? String(event.id).slice(0, 8) : 'SYSTEM'}
                           </span>
                           <span className="text-[10px] font-mono text-slate-600 font-bold">
                             {format(new Date(event.timestamp), 'HH:mm:ss.SSS')}
                           </span>
                         </div>
-                        <p className="text-sm text-slate-200 font-medium leading-relaxed">{event.message}</p>
+                        <p className="text-sm text-slate-200 font-medium leading-relaxed">
+                          {formatSystemLog(event.message)}
+                        </p>
                         {event.details && (
                           <div className="mt-3 p-3 bg-black/30 rounded-xl border border-white/5 font-mono text-[10px] text-slate-500">
                             {JSON.stringify(event.details, null, 2)}

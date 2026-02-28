@@ -17,17 +17,21 @@ from packages.shared.models import (
     RiskLog, 
     Position, 
     Signal as SignalModel,
-    Event
+    Event,
+    Event as EventModel
 )
 from packages.shared.schemas import RiskConfig, MarketSnapshot, Decision as DecisionSchema
-from packages.shared.enums import ActionType
+from packages.shared.enums import ActionType, Side, MarketRegime
 from packages.shared.exchange.mock import MockExchange
 from packages.shared.exchange.binance_futures import BinanceFuturesClient
 from packages.shared.risk_engine import RiskEngine
 from packages.shared.logger import logger
-from apps.worker.agents.trader_stub import TraderStub
 from apps.worker.engine.execution import ExecutionEngine
 from apps.worker.engine.reconciler import ReconcilerEngine
+from packages.shared.ai_orchestrator import AIOrchestrator
+from packages.shared.llm_adapter import get_llm_adapter
+from packages.shared.prompt_pack import PromptPackSchema, RegimeDefinition, EntryPlaybook, ExitPlaybook, TimeFrame
+from packages.shared.models import TraderContext
 
 class TradingWorker:
     """
@@ -51,12 +55,20 @@ class TradingWorker:
             self.is_binance = False
             logger.info("exchange_initialized", type="mock")
         
-        self.trader = TraderStub()
+        self.trader = None # Will be initialized in initialize()
         self.execution_engine = ExecutionEngine(self.exchange)
         self.reconciler = ReconcilerEngine(self.exchange)
         self.risk_engine: RiskEngine | None = None
+        self.orchestrator: AIOrchestrator | None = None
+        self.prompt_pack: PromptPackSchema | None = None
+        self.trader_context: str | None = None
         self.loop_count = 0
         self.binance_session = None  # For Binance async client
+        self.symbols_to_monitor = [
+            "BTCUSDT", "ETHUSDT", "LINKUSDT", "XRPUSDT", 
+            "DOTUSDT", "UNIUSDT", "DOGEUSDT", "SOLUSDT", 
+            "ADAUSDT", "MATICUSDT", "AVAXUSDT"
+        ]
 
     async def initialize(self) -> None:
         """Initialize worker"""
@@ -75,8 +87,9 @@ class TradingWorker:
             await self.exchange.sync_server_time()
             logger.info("binance_session_initialized")
         
-        # Load risk config from database
+        # Load risk config and prompt pack from database
         async with AsyncSessionFactory() as session:
+            # 1. Load Risk Config
             result = await session.execute(
                 select(BotConfig).where(BotConfig.is_active == True).order_by(BotConfig.id.desc())
             )
@@ -88,19 +101,57 @@ class TradingWorker:
             else:
                 risk_config = RiskConfig(**bot_config.risk_json)
                 logger.info("risk_config_loaded", version=bot_config.version)
-        
-        # Initialize risk engine
-        self.risk_engine = RiskEngine(risk_config)
-        
-        # ✅ CRITICAL: Initialize trader with max_position_pct limit
-        # This ensures AI never generates size > config limit
-        self.trader = TraderStub(max_position_pct=risk_config.max_position_pct)
-        logger.info(
-            "trader_stub_initialized_with_limit",
-            max_position_pct=f"{risk_config.max_position_pct*100:.1f}%",
-            context="AI will generate sizes within [30%, 95%] of max to maintain safety margin"
-        )
-        
+            
+            self.risk_engine = RiskEngine(risk_config)
+
+            # 2. Load latest Trader Context (Human Expertise)
+            context_result = await session.execute(
+                select(TraderContext).order_by(TraderContext.timestamp.desc())
+            )
+            latest_context = context_result.scalars().first()
+            if latest_context:
+                self.trader_context = latest_context.prompt
+                logger.info("trader_context_loaded", trader=latest_context.trader_name)
+
+            # 3. Load or Create Default Prompt Pack
+            # In Phase 5+, we use AIOrchestrator
+            self.prompt_pack = PromptPackSchema(
+                name="Neural Default Strategy",
+                symbols=self.symbols_to_monitor,
+                timeframe=TimeFrame.HOUR_1,
+                regimes=[
+                    RegimeDefinition(name="Trending Up", indicators={"EMA_20 > EMA_50": True}, description="Price trending upwards"),
+                    RegimeDefinition(name="Range Bound", indicators={"RSI": "between 40 and 60"}, description="Market consolidates"),
+                    RegimeDefinition(name="Trending Down", indicators={"EMA_20 < EMA_50": True}, description="Price trending downwards")
+                ],
+                entry_playbooks=[
+                    EntryPlaybook(side="LONG", regime="Trending Up", conditions=["Price > EMA_20", "RSI > 50"], target_ratio=2.0),
+                    EntryPlaybook(side="SHORT", regime="Trending Down", conditions=["Price < EMA_20", "RSI < 40"], target_ratio=2.0)
+                ],
+                exit_playbooks=[
+                    ExitPlaybook(side="LONG", profit_target="2:1 ratio or RSI overbought", stop_loss="Below recent swing low"),
+                    ExitPlaybook(side="SHORT", profit_target="2:1 ratio or RSI oversold", stop_loss="Above recent swing high")
+                ],
+                min_analysis_confidence=0.6,
+                risk_params={
+                    "max_position_pct": risk_config.max_position_pct * 100, # PromptPack uses % (1-100)
+                    "max_leverage": risk_config.max_leverage,
+                    "min_risk_ratio": 1.5,
+                    "max_concurrent_positions": risk_config.max_concurrent_positions
+                }
+            )
+            
+            # Initialize LLM Adapter
+            llm_provider = settings.selected_llm # 'openai' or 'claude'
+            llm = get_llm_adapter(
+                provider=settings.selected_llm,
+                api_key=settings.openai_api_key if settings.selected_llm in ('openai', 'groq') else settings.anthropic_api_key,
+                model=settings.openai_model if settings.selected_llm in ('openai', 'groq') else settings.anthropic_model
+            )
+            
+            self.orchestrator = AIOrchestrator(llm)
+            logger.info("ai_orchestrator_linked", provider=llm_provider, model=llm.model)
+
         logger.info("worker_initialized")
 
     async def run(self) -> None:
@@ -140,12 +191,7 @@ class TradingWorker:
 
     async def _execute_loop_iteration(self) -> None:
         """Execute one iteration of the trading loop for all configured symbols"""
-        # Danh sách các cặp coin AI sẽ theo dõi
-        symbols = [
-            "BTCUSDT", "ETHUSDT", "LINKUSDT", "XRPUSDT", 
-            "DOTUSDT", "UNIUSDT", "DOGEUSDT", "SOLUSDT", 
-            "ADAUSDT", "MATICUSDT", "AVAXUSDT"
-        ]
+        symbols = self.symbols_to_monitor
         
         async with AsyncSessionFactory() as session:
             try:
@@ -183,19 +229,250 @@ class TradingWorker:
                             pos.unrealized_pnl = (entry_price - current_price) * qty
                         pos.updated_at = datetime.utcnow()
 
-                    # Step 2: Get AI decision (passing active position context)
+                    # ═══════════════════════════════════════════════════════════
+                    # ✅ PROACTIVE TP/SL MONITORING
+                    # Uses dynamically parsed trader intent - no hardcoded values
+                    # The AI reads the trader's prompt and extracts profit targets
+                    # ═══════════════════════════════════════════════════════════
                     active_pos = db_positions.get(symbol)
-                    decision = await self.trader.decide(snapshot, active_position=active_pos)
+                    if active_pos and active_pos.unrealized_pnl is not None:
+                        current_pnl = float(active_pos.unrealized_pnl)
+                        current_price = snapshot.close
+                        pos_tp = float(active_pos.take_profit) if active_pos.take_profit else None
+                        pos_sl = float(active_pos.stop_loss) if active_pos.stop_loss else None
+                        pos_side = active_pos.side.lower()
+
+                        # Get dynamic thresholds from cached trader intent
+                        # This is what the trader wrote in their prompt - AI parsed it
+                        trader_intent = self.orchestrator._cached_intent or {}
+                        profit_target_usd = trader_intent.get("profit_target_usd")  # e.g. 2.0
+                        max_loss_usd = trader_intent.get("max_loss_usd")             # e.g. -5.0
+                        max_hold_mins = trader_intent.get("max_hold_minutes")        # e.g. 60
+                        
+                        # Fallback to system risk limits if trader didn't specify SL
+                        # This prevents the AI from exiting too early or staying too long without a plan
+                        if max_loss_usd is None and self.risk_engine.config.get("max_risk_per_trade_pct"):
+                            # Estimate dollar loss based on account balance and risk %
+                            try:
+                                balance_info = await self.exchange.get_account_balance() if self.is_binance else await self.exchange.get_balance()
+                                balance = float(balance_info[0]["balance"]) if self.is_binance and isinstance(balance_info, list) else float(balance_info.get("balance", 0))
+                                risk_pct = self.risk_engine.config["max_risk_per_trade_pct"] / 100.0
+                                max_loss_usd = balance * risk_pct
+                            except:
+                                pass
+
+                        should_close = False
+                        close_reason = ""
+
+                        # Check TP hit via price
+                        if pos_tp:
+                            if pos_side == "long" and current_price >= pos_tp:
+                                should_close = True
+                                close_reason = f"Take Profit chạm đích: giá {current_price:.4f} >= TP {pos_tp:.4f}"
+                            elif pos_side == "short" and current_price <= pos_tp:
+                                should_close = True
+                                close_reason = f"Take Profit chạm đích: giá {current_price:.4f} <= TP {pos_tp:.4f}"
+
+                        # Check SL hit via price
+                        if pos_sl and not should_close:
+                            if pos_side == "long" and current_price <= pos_sl:
+                                should_close = True
+                                close_reason = f"Stop Loss bị kích hoạt: giá {current_price:.4f} <= SL {pos_sl:.4f}"
+                            elif pos_side == "short" and current_price >= pos_sl:
+                                should_close = True
+                                close_reason = f"Stop Loss bị kích hoạt: giá {current_price:.4f} >= SL {pos_sl:.4f}"
+
+                        # Check profit target (from trader's own prompt - dynamically parsed)
+                        if not should_close and profit_target_usd is not None and current_pnl >= profit_target_usd:
+                            should_close = True
+                            close_reason = (
+                                f"Đạt mục tiêu lợi nhuận từ chiến lược trader: "
+                                f"PnL ${current_pnl:.2f} >= mục tiêu ${profit_target_usd:.2f}. Chốt lời."
+                            )
+
+                        # Check max loss (from trader's own prompt)
+                        if not should_close and max_loss_usd is not None and current_pnl <= -abs(max_loss_usd):
+                            should_close = True
+                            close_reason = (
+                                f"Vượt ngưỡng lỗ tối đa: PnL ${current_pnl:.2f} <= -${abs(max_loss_usd):.2f}. Cắt lỗ."
+                            )
+
+                        # Check max hold time (from trader's own prompt)
+                        if not should_close and max_hold_mins is not None and active_pos.opened_at:
+                            from datetime import timedelta
+                            hold_time = (datetime.utcnow() - active_pos.opened_at).total_seconds() / 60
+                            if hold_time >= max_hold_mins:
+                                should_close = True
+                                close_reason = (
+                                    f"Đã giữ lệnh {hold_time:.0f} phút >= giới hạn {max_hold_mins} phút. Đóng lệnh."
+                                )
+
+                        if should_close:
+                            logger.info(
+                                "proactive_tp_sl_triggered",
+                                symbol=symbol,
+                                pnl=current_pnl,
+                                reason=close_reason
+                            )
+                            close_side = Side.SHORT if pos_side == "long" else Side.LONG
+                            exit_decision = DecisionSchema(
+                                regime=MarketRegime.RANGE,
+                                action=ActionType.CLOSE,
+                                symbol=symbol,
+                                side=close_side,
+                                size_pct=0.01,
+                                leverage=1,
+                                entry_price=current_price,
+                                confidence=1.0,
+                                rationale=close_reason,
+                                checklist=[]
+                            )
+                            # Create Decision record for proactive closure
+                            exit_decision_model = DecisionModel(
+                                timestamp=datetime.utcnow(),
+                                trace_id=trace_id,
+                                decision_json=_serialize(exit_decision.model_dump()),
+                                confidence=1.0,
+                                regime=MarketRegime.RANGE.value,
+                                rationale=close_reason,
+                                status="PENDING",
+                                decision_type="EXIT"
+                            )
+                            session.add(exit_decision_model)
+                            await session.flush()
+
+                            try:
+                                close_result = await self.execution_engine.execute_decision(
+                                    decision=exit_decision,
+                                    trace_id=trace_id,
+                                    session=session
+                                )
+                                if close_result.get("status") == "success":
+                                    logger.info("proactive_close_success", symbol=symbol, pnl=current_pnl)
+                                    
+                                    # Update Decision record with resulting order_id
+                                    exit_decision_model.status = "EXECUTED"
+                                    exit_decision_model.order_id = str(close_result.get("order_id"))
+                                    
+                                    close_event = EventModel(
+                                        timestamp=datetime.utcnow(),
+                                        level="INFO",
+                                        code="AUTO_CLOSE_TP",
+                                        message=f"[AUTO-CLOSE] {symbol}: {close_reason} | PnL: ${current_pnl:+.2f}",
+                                        trace_id=trace_id,
+                                        data_json={"symbol": symbol, "pnl": current_pnl, "reason": close_reason}
+                                    )
+                                    session.add(close_event)
+                                    await session.flush()
+                                    continue  # Skip AI decision for this symbol this cycle
+                                else:
+                                    exit_decision_model.status = "FAILED"
+                            except Exception as close_err:
+                                logger.error("proactive_close_failed", symbol=symbol, error=str(close_err))
+                                exit_decision_model.status = "FAILED"
+                                exit_decision_model.execution_error = str(close_err)
+
+                    # Step 2: Get real AI decision from Orchestrator
+                    # Build ENRICHED position data for AI (includes entry_price, tp, sl, pnl%)
+                    current_positions_list = []
+                    for p in db_positions.values():
+                        p_entry = float(p.entry_price) if p.entry_price else 0
+                        p_qty = float(p.qty) if p.qty else 0
+                        p_pnl = float(p.unrealized_pnl) if p.unrealized_pnl else 0
+                        p_tp = float(p.take_profit) if p.take_profit else None
+                        p_sl = float(p.stop_loss) if p.stop_loss else None
+                        current_positions_list.append({
+                            "symbol": p.symbol,
+                            "side": p.side,
+                            "qty": p_qty,
+                            "entry_price": p_entry,
+                            "take_profit": p_tp,
+                            "stop_loss": p_sl,
+                            "unrealized_pnl_usd": round(p_pnl, 4),
+                            "opened_at": p.opened_at.isoformat() if p.opened_at else None,
+                        })
+                    
+                    # Convert MarketSnapshot to dict for AI
+                    # Serialize datetimes to strings to avoid DB JSON serialization error
+                    import json as _json
+                    _raw = snapshot.model_dump()
+                    snapshot_dict = _json.loads(
+                        _json.dumps(_raw, default=lambda o: o.isoformat() if hasattr(o, 'isoformat') else str(o))
+                    )
+                    
+                    # Call Real AI Orchestrator
+                    result = await self.orchestrator.make_decision(
+                        market_snapshot=snapshot_dict,
+                        prompt_pack=self.prompt_pack,
+                        current_positions=current_positions_list,
+                        trader_context=self.trader_context
+                    )
+                    
+                    if not result["valid"]:
+                        logger.error(f"AI Decision failed for {symbol}: {result['errors']}")
+                        continue
+                    
+                    ai_decision = result["decision"] # This is AIDecisionOutput
+                    
+                    # Mapper AIDecisionOutput to Decisions Schema (ActionType/Side)
+                    # AIDecisionOutput usage: decision_type (ENTRY, EXIT, NO_TRADE)
+                    # action mapping
+                    action_map = {
+                        "ENTRY": ActionType.OPEN,
+                        "EXIT": ActionType.CLOSE,
+                        "MODIFY": ActionType.HOLD, # Assuming modify is like hold for now
+                        "NO_TRADE": ActionType.HOLD
+                    }
+                    
+                    # regime mapping
+                    regime_map = {
+                        "Trending Up": MarketRegime.TREND,
+                        "Trending Down": MarketRegime.TREND,
+                        "Range Bound": MarketRegime.RANGE,
+                        "Volatile": MarketRegime.VOLATILITY_SPIKE,
+                        "Sideways": MarketRegime.RANGE,
+                        "breakout": MarketRegime.BREAKOUT,
+                        "trend": MarketRegime.TREND,
+                        "range": MarketRegime.RANGE,
+                    }
+                    
+                    # side mapping
+                    side_val = None
+                    if ai_decision.order_spec:
+                        side_val = Side.LONG if ai_decision.order_spec.side.upper() == "BUY" else Side.SHORT
+                    
+                    # Create Decision Schema for local systems
+                    decision = DecisionSchema(
+                        regime=regime_map.get(ai_decision.market_regime, MarketRegime.RANGE),
+                        action=action_map.get(ai_decision.decision_type.value, ActionType.HOLD),
+                        symbol=symbol,
+                        side=side_val,
+                        size_pct=(ai_decision.risk_assessment.get("position_pct", 5.0) / 100.0) if ai_decision.decision_type.value == "ENTRY" else 0.1,
+                        leverage=int(ai_decision.order_spec.leverage) if ai_decision.order_spec else 1,
+                        entry_price=ai_decision.order_spec.entry_price if ai_decision.order_spec else snapshot.close,
+                        stop_loss=ai_decision.order_spec.stop_loss_price if ai_decision.order_spec else None,
+                        take_profit=ai_decision.order_spec.take_profit_prices[0] if (ai_decision.order_spec and ai_decision.order_spec.take_profit_prices) else None,
+                        confidence=ai_decision.confidence,
+                        rationale=ai_decision.rationale,
+                        checklist=[] # Can be populated from ai_decision.checklist_results if needed
+                    )
 
                     # Step 3: Save decision to database
+                    # Serialize to avoid datetime JSON serialization errors
+                    def _serialize(obj):
+                        return _json.loads(
+                            _json.dumps(obj, default=lambda o: o.isoformat() if hasattr(o, 'isoformat') else str(o))
+                        )
                     decision_record = DecisionModel(
                         timestamp=datetime.utcnow(),
                         trace_id=trace_id,
-                        decision_json=decision.model_dump(),
-                        confidence=decision.confidence,
-                        regime=decision.regime.value,
-                        rationale=decision.rationale,
-                        checklist_results=[c.model_dump(by_alias=True) for c in decision.checklist],
+                        decision_json=_serialize(ai_decision.model_dump()),
+                        confidence=ai_decision.confidence,
+                        regime=ai_decision.market_regime,
+                        decision_type=ai_decision.decision_type.value if hasattr(ai_decision.decision_type, 'value') else str(ai_decision.decision_type),
+                        rationale=ai_decision.rationale,
+                        market_snapshot=snapshot_dict,
+                        checklist_results=_serialize([c.model_dump() for c in ai_decision.checklist_results]),
                         status="PENDING",
                     )
                     session.add(decision_record)
@@ -233,7 +510,8 @@ class TradingWorker:
                                 
                                 if execution_result.get("status") == "success":
                                     decision_record.status = "EXECUTED"
-                                    logger.info(f"✅ Executed {decision.action} for {symbol}", trace_id=trace_id)
+                                    decision_record.order_id = str(execution_result.get("order_id"))
+                                    logger.info(f"Executed {decision.action} for {symbol}", trace_id=trace_id)
                                 else:
                                     decision_record.status = "FAILED"
                             except Exception as exec_err:
@@ -241,7 +519,12 @@ class TradingWorker:
                                 decision_record.status = "FAILED"
                         else:
                             decision_record.status = "REJECTED"
-                            logger.warning(f"🛡️ Risk REJECTED {decision.action} for {symbol}: {risk_result.reason}")
+                            logger.warning(f"Risk REJECTED {decision.action} for {symbol}: {risk_result.reason}")
+                    else:
+                        # For HOLD actions, mark as passing risk (implicitly) and status as OBSERVING
+                        decision_record.risk_passed = True
+                        decision_record.risk_approval_reason = "Lệnh quan sát - Không vi phạm quy tắc rủi ro"
+                        decision_record.status = "OBSERVING"
 
                 await session.commit()
                 logger.info(f"loop_iteration_complete", loop_count=self.loop_count)
@@ -291,11 +574,15 @@ class TradingWorker:
                             session=session,
                         )
                         
-                        # Update status
-                        decision_record.status = "EXECUTED" if execution_result.get("status") == "success" else "FAILED"
+                        if execution_result.get("status") == "success":
+                            decision_record.status = "EXECUTED"
+                            decision_record.order_id = str(execution_result.get("order_id"))
+                        else:
+                            decision_record.status = "FAILED"
+                        
                         decision_record.execution_status = execution_result.get("status")
-                        if execution_result.get("status") == "error":
-                            decision_record.execution_error = execution_result.get("error")
+                        if execution_result.get("status") == "error" or execution_result.get("status") == "failed":
+                            decision_record.execution_error = execution_result.get("reason") or execution_result.get("error")
                             
                         await session.commit()
                         logger.info("manual_execution_completed", trace_id=trace_id, status=decision_record.status)
