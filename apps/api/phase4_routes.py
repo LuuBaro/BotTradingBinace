@@ -11,6 +11,8 @@ from sqlalchemy import select, func
 from pathlib import Path
 from dotenv import set_key
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
+import ipaddress
 import httpx
 import uuid
 import json
@@ -100,6 +102,37 @@ def _get_target_user_id(requester: Any, user_id: str | None = None) -> str:
     if user_id and requester and requester.role == "admin":
         return user_id
     return requester.id if requester else None
+
+
+def _validate_ai_provider(provider: str) -> str:
+    allowed = {"openai", "anthropic", "claude", "gemini", "google", "groq", "local", "manual", "mock"}
+    normalized = (provider or "openai").strip().lower()
+    if normalized not in allowed:
+        raise HTTPException(status_code=400, detail=f"Unsupported ai_provider: {provider}")
+    return normalized
+
+
+def _validate_custom_endpoint(endpoint: str | None) -> str | None:
+    if not endpoint:
+        return None
+
+    parsed = urlparse(endpoint.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="ai_custom_endpoint must be a valid http(s) URL")
+
+    host = parsed.hostname.lower()
+    if host in {"localhost"}:
+        raise HTTPException(status_code=400, detail="ai_custom_endpoint cannot target localhost")
+
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast:
+            raise HTTPException(status_code=400, detail="ai_custom_endpoint cannot target private/internal IPs")
+    except ValueError:
+        # Hostname (not raw IP): allow
+        pass
+
+    return endpoint.strip()
 
 
 def _serialize_settings(mask_secrets: bool = True) -> dict:
@@ -2141,12 +2174,15 @@ async def update_user_credentials(
             cred.binance_api_secret = encrypt_key(request.binance_api_secret)
             
         cred.use_testnet = request.use_testnet
-        
-        if request.ai_provider: cred.ai_provider = request.ai_provider
+
+        if request.ai_provider:
+            cred.ai_provider = _validate_ai_provider(request.ai_provider)
         if request.ai_api_key and "***" not in request.ai_api_key:
             cred.ai_api_key = encrypt_key(request.ai_api_key)
-        if request.ai_model: cred.ai_model = request.ai_model
-        if request.ai_custom_endpoint: cred.ai_custom_endpoint = request.ai_custom_endpoint
+        if request.ai_model:
+            cred.ai_model = request.ai_model.strip()
+        if request.ai_custom_endpoint is not None:
+            cred.ai_custom_endpoint = _validate_custom_endpoint(request.ai_custom_endpoint)
         
         await db.commit()
         return {"status": "success", "message": "Neural preferences updated."}
