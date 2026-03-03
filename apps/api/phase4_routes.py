@@ -127,6 +127,11 @@ def _serialize_settings(mask_secrets: bool = True) -> dict:
     }
 
 
+def _serialize_settings_for_audit() -> dict:
+    """Persist config snapshots without plaintext secrets."""
+    return _serialize_settings(mask_secrets=True)
+
+
 class SettingsUpdate(BaseModel):
     env: str | None = None
     api_host: str | None = None
@@ -1654,7 +1659,7 @@ async def update_settings(payload: SettingsUpdate, credentials: Any = Depends(se
             manager = ConfigVersionManager(session)
             await manager.create_version(
                 config_type="system",
-                config=_serialize_settings(mask_secrets=False),
+                config=_serialize_settings_for_audit(),
                 created_by=user.username,
                 description="System settings updated via UI",
             )

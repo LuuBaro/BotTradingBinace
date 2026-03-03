@@ -246,9 +246,12 @@ class Position(Base):
     """Current positions"""
 
     __tablename__ = "positions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "symbol", name="uq_positions_user_symbol"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    symbol: Mapped[str] = mapped_column(String(20), nullable=False, unique=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     side: Mapped[str] = mapped_column(String(10), nullable=False)
     qty: Mapped[float] = mapped_column(Float, nullable=False)
     entry_price: Mapped[float] = mapped_column(Float, nullable=False)

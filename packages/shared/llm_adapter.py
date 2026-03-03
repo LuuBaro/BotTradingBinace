@@ -290,7 +290,6 @@ class GeminiAdapter(LLMAdapter):
             model = f"models/{model}"
         self.model = model
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
-        self._fallback_to_mock = False  # Fallback flag
 
     async def generate(self, prompt: str) -> str:
         """Generate response using Google Gemini API (native format, not OpenAI)"""
@@ -323,13 +322,9 @@ class GeminiAdapter(LLMAdapter):
                         await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
                         continue
 
-                    # Handle quota exceeded (429) by falling back to Mock
+                    # Never fall back to Mock in live flows: quota errors must be explicit
                     if response.status_code == 429:
-                        import logging
-                        logging.warning("⚠️ Gemini API quota exceeded (429). Falling back to MockLLMAdapter.")
-                        self._fallback_to_mock = True
-                        mock_adapter = MockLLMAdapter()
-                        return await mock_adapter.generate(prompt)
+                        raise RuntimeError("Gemini API quota exceeded (429)")
 
                     if response.status_code != 200:
                         snippet = (response.text or "")[:300]
