@@ -1904,81 +1904,86 @@ async def approve_decision(trace_id: str, credentials: Any = Depends(security)):
 @router.post("/positions/{symbol}/close")
 async def close_position_manual(
     symbol: str,
+    user_id: str | None = None,
     credentials: Any = Depends(security)
 ):
-    """Manually close a position"""
+    """Manually close a position for current user (or target user when admin)."""
     logger.info("close_position_start", symbol=symbol)
-    
-    user = await jwt_handler.verify_token(credentials.credentials)
-    if not user or user.role not in ("admin", "trader"):
+
+    requester = await jwt_handler.verify_token(credentials.credentials)
+    if not requester or requester.role not in ("admin", "trader"):
         raise HTTPException(status_code=403, detail="Forbidden")
+
+    target_id = _get_target_user_id(requester, user_id)
 
     from packages.shared.exchange.binance_futures import BinanceFuturesClient
     from packages.shared.exchange.mock import MockExchange
     from apps.worker.engine.execution import ExecutionEngine
     from packages.shared.schemas import Decision
     from packages.shared.enums import ActionType, MarketRegime, Side
-    
+    from packages.shared.models import UserCredential
+
     async with AsyncSessionFactory() as session:
         try:
-            logger.info("close_position_session_created", user_id=user.id, symbol=symbol)
-            
-            # Determine exchange
-            if settings.binance_api_key and settings.binance_api_secret:
-                logger.info("close_position_using_binance", symbol=symbol)
-                async with BinanceFuturesClient() as exchange:
+            logger.info("close_position_session_created", requester_id=requester.id, target_id=target_id, symbol=symbol)
+
+            # Resolve user-specific exchange credentials first
+            cred_res = await session.execute(select(UserCredential).where(UserCredential.user_id == target_id))
+            cred = cred_res.scalar_one_or_none()
+
+            api_key = None
+            api_secret = None
+            use_testnet = settings.binance_testnet
+
+            if cred and cred.binance_api_key and cred.binance_api_secret:
+                api_key = decrypt_key(cred.binance_api_key)
+                api_secret = decrypt_key(cred.binance_api_secret)
+                use_testnet = bool(cred.use_testnet)
+            elif requester.role == "admin" and settings.binance_api_key and settings.binance_api_secret:
+                api_key = settings.binance_api_key
+                api_secret = settings.binance_api_secret
+                use_testnet = settings.binance_testnet
+
+            # Create a close decision
+            trace_id = f"manual_close_{uuid.uuid4().hex[:8]}"
+            decision = Decision(
+                symbol=symbol,
+                action=ActionType.CLOSE,
+                regime=MarketRegime.TREND,
+                side=Side.LONG,
+                confidence=1.0,
+                rationale=f"Manual close by {requester.username}",
+                size_pct=0.01,
+                leverage=1,
+            )
+
+            if api_key and api_secret:
+                logger.info("close_position_using_binance", symbol=symbol, target_id=target_id, testnet=use_testnet)
+                async with BinanceFuturesClient(api_key=api_key, api_secret=api_secret, testnet=use_testnet) as exchange:
                     execution_engine = ExecutionEngine(exchange)
-                    trace_id = f"manual_close_{uuid.uuid4().hex[:8]}"
-                    
-                    # Create a mock decision for closing
-                    decision = Decision(
-                        symbol=symbol,
-                        action=ActionType.CLOSE,
-                        regime=MarketRegime.TREND,
-                        side=Side.LONG,
-                        confidence=1.0,
-                        rationale=f"Manual close by {user.username}",
-                        size_pct=0.01,  # Not used for CLOSE, just placeholder
-                        leverage=1,    # Not used for CLOSE, just placeholder
-                    )
-                    logger.info("close_decision_created", trace_id=trace_id, symbol=symbol)
-                    
-                    result = await execution_engine.execute_decision(session, user.id, decision, trace_id)
-                    logger.info("close_position_success", trace_id=trace_id, symbol=symbol)
+                    result = await execution_engine.execute_decision(session, target_id, decision, trace_id)
+                    logger.info("close_position_success", trace_id=trace_id, symbol=symbol, target_id=target_id)
                     return result
-            else:
-                logger.info("close_position_using_mock", symbol=symbol)
-                exchange = MockExchange()
-                execution_engine = ExecutionEngine(exchange)
-                trace_id = f"manual_close_{uuid.uuid4().hex[:8]}"
-                
-                # Create a mock decision for closing
-                decision = Decision(
-                    symbol=symbol,
-                    action=ActionType.CLOSE,
-                    regime=MarketRegime.TREND,
-                    side=Side.LONG,
-                    confidence=1.0,
-                    rationale=f"Manual close by {user.username}",
-                    size_pct=0.01,  # Not used for CLOSE, just placeholder
-                    leverage=1,    # Not used for CLOSE, just placeholder
-                )
-                logger.info("close_decision_created", trace_id=trace_id, symbol=symbol)
-                
-                result = await execution_engine.execute_decision(session, user.id, decision, trace_id)
-                logger.info("close_position_success", trace_id=trace_id, symbol=symbol)
-                return result
+
+            logger.info("close_position_using_mock", symbol=symbol, target_id=target_id)
+            exchange = MockExchange()
+            execution_engine = ExecutionEngine(exchange)
+            result = await execution_engine.execute_decision(session, target_id, decision, trace_id)
+            logger.info("close_position_success", trace_id=trace_id, symbol=symbol, target_id=target_id)
+            return result
         except Exception as e:
             import traceback
             logger.error(
                 "manual_close_failed",
                 symbol=symbol,
-                user_id=str(user.id),
+                requester_id=str(requester.id),
+                target_id=str(target_id),
                 error=str(e),
                 error_type=type(e).__name__,
                 traceback=traceback.format_exc()
             )
             raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/positions/open")
 async def open_position_manual(
     payload: dict, # symbol, side, leverage, size_pct
