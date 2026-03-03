@@ -49,6 +49,8 @@ class TradingWorker:
         self.running = False
         self.binance_session = None
         self.loop_count = 0
+        # Keep per-user AI runtime to avoid recreating adapter/orchestrator every loop
+        self._ai_runtime_by_user: dict[str, dict] = {}
         self.symbols_to_monitor = [
             "BTCUSDT", "ETHUSDT", "LINKUSDT", "XRPUSDT", 
             "DOTUSDT", "UNIUSDT", "DOGEUSDT", "SOLUSDT", 
@@ -140,6 +142,32 @@ class TradingWorker:
             
         return binance_keys, llm_config
 
+    def _get_or_create_orchestrator(self, user_id: str, llm_conf: dict) -> AIOrchestrator:
+        """Reuse AI orchestrator per-user unless provider/model/key/endpoint changed."""
+        fingerprint = (
+            llm_conf.get("provider"),
+            llm_conf.get("model"),
+            llm_conf.get("api_key"),
+            llm_conf.get("custom_endpoint"),
+        )
+
+        runtime = self._ai_runtime_by_user.get(user_id)
+        if runtime and runtime.get("fingerprint") == fingerprint:
+            return runtime["orchestrator"]
+
+        llm = get_llm_adapter(
+            provider=llm_conf["provider"],
+            api_key=llm_conf["api_key"],
+            model=llm_conf["model"],
+            custom_endpoint=llm_conf.get("custom_endpoint"),
+        )
+        orchestrator = AIOrchestrator(llm)
+        self._ai_runtime_by_user[user_id] = {
+            "fingerprint": fingerprint,
+            "orchestrator": orchestrator,
+        }
+        return orchestrator
+
     async def run(self) -> None:
         """Main dispatcher loop"""
         self.running = True
@@ -210,13 +238,7 @@ class TradingWorker:
         exchange.session = self.binance_session
         await exchange.sync_server_time()
 
-        llm = get_llm_adapter(
-            provider=llm_conf["provider"],
-            api_key=llm_conf["api_key"],
-            model=llm_conf["model"],
-            custom_endpoint=llm_conf.get("custom_endpoint"),
-        )
-        orchestrator = AIOrchestrator(llm)
+        orchestrator = self._get_or_create_orchestrator(user.id, llm_conf)
 
         if not bot_config:
             logger.warning(f"No active BotConfig for user {user.id}, using defaults")
@@ -606,6 +628,7 @@ class TradingWorker:
         self.running = False
         if self.binance_session:
             await self.binance_session.close()
+        self._ai_runtime_by_user.clear()
         await close_db()
         logger.info("worker_shutdown_complete")
 
