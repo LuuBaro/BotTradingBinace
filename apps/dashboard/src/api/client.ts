@@ -8,6 +8,8 @@ export interface ApiConfig {
 export class ApiClient {
   private axiosInstance: AxiosInstance
 
+  private targetUserId: string | null = null
+
   constructor(config: ApiConfig) {
     console.log('📡 API Client initialized with baseURL:', config.baseURL)
     this.axiosInstance = axios.create({
@@ -17,6 +19,10 @@ export class ApiClient {
         ...(config.token && { 'Authorization': `Bearer ${config.token}` }),
       },
     })
+
+    // Check for user_id in URL to support admin monitoring
+    const params = new URLSearchParams(window.location.search)
+    this.targetUserId = params.get('user_id')
 
     // Response interceptor for error handling
     this.axiosInstance.interceptors.response.use(
@@ -31,14 +37,45 @@ export class ApiClient {
     )
   }
 
+  setTargetUserId(id: string | null) {
+    this.targetUserId = id
+  }
+
   // Generic helpers
   async get<T = any>(url: string, config?: AxiosRequestConfig) {
-    const res = await this.axiosInstance.get<T>(url, config)
+    const finalUrl = this.targetUserId && !url.includes('user_id=')
+      ? `${url}${url.includes('?') ? '&' : '?'}user_id=${this.targetUserId}`
+      : url
+    const res = await this.axiosInstance.get<T>(finalUrl, config)
     return res
   }
 
-  async post<T = any>(url: string, data?: any) {
-    const res = await this.axiosInstance.post<T>(url, data)
+  async post<T = any>(url: string, data?: any, config?: AxiosRequestConfig) {
+    const finalUrl = this.targetUserId && !url.includes('user_id=')
+      ? `${url}${url.includes('?') ? '&' : '?'}user_id=${this.targetUserId}`
+      : url
+    const res = await this.axiosInstance.post<T>(finalUrl, data, config)
+    return res
+  }
+
+  async put<T = any>(url: string, data?: any, config?: AxiosRequestConfig) {
+    const finalUrl = this.targetUserId && !url.includes('user_id=')
+      ? `${url}${url.includes('?') ? '&' : '?'}user_id=${this.targetUserId}`
+      : url
+    const res = await this.axiosInstance.put<T>(finalUrl, data, config)
+    return res
+  }
+
+  async delete<T = any>(url: string, config?: AxiosRequestConfig) {
+    const finalUrl = this.targetUserId && !url.includes('user_id=')
+      ? `${url}${url.includes('?') ? '&' : '?'}user_id=${this.targetUserId}`
+      : url
+    const res = await this.axiosInstance.delete<T>(finalUrl, config)
+    return res
+  }
+
+  async request<T = any>(config: AxiosRequestConfig) {
+    const res = await this.axiosInstance.request<T>(config)
     return res
   }
 
@@ -71,91 +108,93 @@ export class ApiClient {
 
   // Dashboard endpoints
   async getBotStatus() {
-    const res = await this.axiosInstance.get('bot/status')
+    const res = await this.get('bot/status')
     return res.data
   }
 
   async getPositions() {
-    // Use /live endpoint to get real-time data directly from Binance
-    // Falls back to regular /positions if /live is not available
     try {
-      const res = await this.axiosInstance.get('positions/live')
+      const res = await this.get('positions/live')
       return res.data?.positions || []
     } catch (error) {
-      // Fallback to local database positions if live endpoint fails
-      const res = await this.axiosInstance.get('positions')
+      const res = await this.get('positions')
       return res.data
     }
   }
 
   async getOrders(limit = 100) {
-    const res = await this.axiosInstance.get(`orders?limit=${limit}`)
+    const res = await this.get(`orders?limit=${limit}`)
     return res.data
   }
 
   async getTrades(limit = 100) {
-    const res = await this.axiosInstance.get(`trades?limit=${limit}`)
+    const res = await this.get(`trades?limit=${limit}`)
     return res.data
   }
 
   async closePosition(symbol: string) {
-    const res = await this.axiosInstance.post(`positions/${symbol}/close`)
+    const res = await this.post(`positions/${symbol}/close`)
     return res.data
   }
 
   async openPosition(payload: { symbol: string, side: string, leverage: number, size_pct: number }) {
-    const res = await this.axiosInstance.post('positions/open', payload)
+    const res = await this.post('positions/open', payload)
     return res.data
   }
 
   async getSignals(limit = 50) {
-    const res = await this.axiosInstance.get(`signals?limit=${limit}`)
+    const res = await this.get(`signals?limit=${limit}`)
     return res.data
   }
 
   async getDecisions(limit = 100) {
-    const res = await this.axiosInstance.get(`decisions?limit=${limit}`)
+    const res = await this.get(`decisions?limit=${limit}`)
     return res.data
   }
 
   async getWalletBalance() {
-    const res = await this.axiosInstance.get('wallet/balance')
+    const res = await this.get('wallet/balance')
     return res.data
   }
 
   async getDecisionTrace(traceId: string) {
-    const res = await this.axiosInstance.get(`decisions/${traceId}`)
+    const res = await this.get(`decisions/${traceId}`)
+    return res.data
+  }
+
+  async getRiskLogs(limit = 100) {
+    const res = await this.get(`risk/logs?limit=${limit}`)
     return res.data
   }
 
   async getReconSummary() {
-    const res = await this.axiosInstance.get('recon/summary')
+    const res = await this.get('recon/summary')
     return res.data
   }
 
   async getLatencyMetrics() {
-    const res = await this.axiosInstance.get('health/latency')
+    const res = await this.get('health/latency')
     return res.data
   }
 
   async getHealthStatus() {
-    const res = await this.axiosInstance.get('health/status')
+    const res = await this.get('health/status')
     return res.data
   }
 
   async getEvents(limit = 100) {
-    const res = await this.axiosInstance.get(`events?limit=${limit}`)
+    const res = await this.get(`events?limit=${limit}`)
     return res.data
   }
 
   async getPnlHistory(days = 7) {
-    const res = await this.axiosInstance.get(`reports/pnl-history?days=${days}`)
+    const res = await this.get(`reports/pnl-history?days=${days}`)
     return res.data
   }
 
   // Config endpoints
   async getRiskConfig() {
-    const res = await this.axiosInstance.get('config/risk')
+    const res = await this.get('config/risk')
     return res.data
   }
 
@@ -165,7 +204,7 @@ export class ApiClient {
   }
 
   async getRiskConfigVersions() {
-    const res = await this.axiosInstance.get('config/risk/versions')
+    const res = await this.get('config/risk/versions')
     return res.data
   }
 
@@ -176,7 +215,7 @@ export class ApiClient {
 
   // Audit endpoints
   async getAuditLog(limit = 100, offset = 0) {
-    const res = await this.axiosInstance.get(
+    const res = await this.get(
       `audit?limit=${limit}&offset=${offset}`
     )
     return res.data
@@ -236,7 +275,7 @@ export class ApiClient {
   }
 
   async updateSettings(payload: Record<string, any>) {
-    const res = await this.axiosInstance.put('settings', payload)
+    const res = await this.put('settings', payload)
     return res.data
   }
 
@@ -263,6 +302,12 @@ export class ApiClient {
 
   async deleteNewsSource(sourceId: number) {
     const res = await this.axiosInstance.delete(`intelligence/sources/${sourceId}`)
+    return res.data
+  }
+
+  // AI Chat
+  async chatWithAi(message: string, symbol?: string) {
+    const res = await this.axiosInstance.post('ai/chat', { message, symbol })
     return res.data
   }
 }

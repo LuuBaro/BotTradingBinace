@@ -241,6 +241,81 @@ Respond with ONLY valid JSON (no markdown):
             return self._error_response(f"Exception: {str(e)}")
 
 
+    async def get_trading_decision(
+        self,
+        symbol: str,
+        snapshot: Any,
+        current_position: Optional[Any] = None,
+        trader_context: Optional[str] = None
+    ) -> Any:
+        # Compatibility wrapper for worker
+        from packages.shared.schemas import Decision as DecisionSchema
+        from packages.shared.prompt_pack import PromptPackSchema, RegimeDefinition, EntryPlaybook, ExitPlaybook, Side
+        from packages.shared.enums import MarketRegime, ActionType
+        
+        # We need a proper PromptPack for make_decision
+        # For now, create a default one if none provided
+        dummy_pack = PromptPackSchema(
+            name="Default", version=1, active=True,
+            symbols=[symbol],
+            regimes=[RegimeDefinition(name="Trending Up", indicators={"market": "active"})],
+            entry_playbooks=[EntryPlaybook(side=Side.LONG, regime="Trending Up", conditions=["price > ema20"])],
+            exit_playbooks=[ExitPlaybook(side=Side.LONG, profit_target="2xR", stop_loss="ema20 break")],
+            no_trade_conditions=[]
+        )
+        
+        # Convert snapshot to dict for make_decision
+        snap_dict = snapshot.model_dump()
+        
+        # Mock positions list
+        positions = []
+        if current_position:
+            positions.append({
+                "symbol": current_position.symbol,
+                "side": current_position.side,
+                "qty": current_position.qty,
+                "pnl": current_position.unrealized_pnl
+            })
+            
+        res = await self.make_decision(
+            market_snapshot=snap_dict,
+            prompt_pack=dummy_pack,
+            current_positions=positions,
+            trader_context=trader_context
+        )
+        
+        if not res["valid"] or not res["decision"]:
+            return DecisionSchema(
+                regime=MarketRegime.RANGE,
+                action=ActionType.NONE,
+                symbol=symbol,
+                size_pct=0.01,
+                leverage=1,
+                confidence=0.0,
+                rationale=res.get("errors", [{"error": "unknown"}])[0].get("error", "AI failed")
+            )
+            
+        ai_out = res["decision"]
+        
+        # Convert AIDecisionOutput to Decision schema
+        # This is where we bridge the gap
+        order = ai_out.order_spec
+        
+        return DecisionSchema(
+            regime=MarketRegime(ai_out.market_regime.upper().replace(" ", "_")) if ai_out.market_regime.upper().replace(" ", "_") in [r.value for r in MarketRegime] else MarketRegime.RANGE,
+            action=ActionType(ai_out.decision_type),
+            symbol=symbol,
+            side=Side(order.side) if order and order.side else None,
+            entry_price=order.entry_price if order else None,
+            size_pct=0.05, # Default or from risk assessment
+            leverage=int(order.leverage) if order and order.leverage else 1,
+            stop_loss=order.stop_loss_price if order else None,
+            take_profit=order.take_profit_prices[0] if order and order.take_profit_prices else None,
+            confidence=ai_out.confidence,
+            rationale=ai_out.rationale
+        )
+
+
     def _check_no_trade_conditions(
         self,
         prompt_pack: PromptPackSchema,
@@ -605,6 +680,73 @@ STRICT EXECUTION RULES:
             return str(obj)
             
         return json.dumps(data, indent=2, default=default)
+
+    async def chat_with_trader(
+        self,
+        user_message: str,
+        market_snapshot: Dict[str, Any],
+        current_positions: Optional[List[Dict[str, Any]]] = None,
+        recent_decisions: Optional[List[Dict[str, Any]]] = None,
+        recent_events: Optional[List[Dict[str, Any]]] = None, # New field
+        trader_context: Optional[str] = None
+    ) -> str:
+        """
+        Have a conversation with the AI Trader about its current state and decisions.
+        
+        This allows the human trader to 'manage' the AI by asking what it's doing
+        and why, creating a colleague-like relationship.
+        """
+        # Step 1: Parse trader intent if context provided
+        parsed_intent = {}
+        if trader_context:
+            parsed_intent = await self.parse_trader_intent(trader_context)
+
+        # Step 2: Build the conversation prompt
+        positions_str = self._serialize_json(current_positions) if current_positions else "No open positions."
+        decisions_str = self._serialize_json(recent_decisions) if recent_decisions else "No recent decisions recorded."
+        events_str = self._serialize_json(recent_events) if recent_events else "No recent system events." # New field
+        intent_str = json.dumps(parsed_intent, indent=2) if parsed_intent else "No specific strategy instructions."
+        market_str = market_snapshot.get("summary", "Stable market conditions") if market_snapshot else "Market data unavailable"
+
+        prompt = f"""You are the Antigravity AI Trading Agent, a professional digital trader managing a Binance Futures account.
+You are currently talking to your manager (the human trader). 
+Your personality is professional, transparent, and data-driven. You should sound like a human colleague who is responsible for the capital.
+
+## YOUR CURRENT CONTEXT:
+- **Market Status:** {market_str}
+- **Current Positions:** 
+{positions_str}
+- **Recent Decisions (last few actions):**
+{decisions_str}
+- **Recent Engine Internal Events (what I've been doing lately):**
+{events_str}
+- **Your Mission (Parsed from Trader's Instructions):** 
+{intent_str}
+
+## USER MESSAGE:
+"{user_message}"
+
+## GUIDELINES FOR YOUR RESPONSE:
+1. Speak as "I" (e.g., "I am currently holding BTC because...", "I decided to stay out because...").
+2. Show that you understand the trader's strategy (e.g., "As you requested, I'm aiming for $2 profit per trade").
+3. Be specific about numbers (PnL, entry prices) if the user asks about them.
+4. If you have no positions, explain why based on the market conditions.
+5. If the user gives new directions in the chat, explain that you will remember this for future decisions (even if the actual system update happens elsewhere).
+6. Keep the tone "professional trader" - confident but cautious about risk.
+
+Respond naturally in the language the user used (Vietnamese or English).
+"""
+        try:
+            response = await self.llm.generate(prompt)
+            # Remove any markdown code block wrappers if the LLM accidentally adds them
+            if response.startswith("```"):
+                response = response.strip("`").strip()
+                if response.startswith("text"):
+                    response = response[4:].strip()
+            return response
+        except Exception as e:
+            logger.error(f"Chat failed: {e}")
+            return "Xin lỗi, tôi gặp sự cố kỹ thuật khi kết nối với bộ não của mình. Vui lòng thử lại sau giây lát."
 
     def get_stats(self) -> Dict[str, Any]:
         """Get orchestrator statistics"""

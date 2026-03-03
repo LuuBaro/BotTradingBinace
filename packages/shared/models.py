@@ -12,7 +12,9 @@ from sqlalchemy import (
     JSON,
     Index,
     ForeignKey,
+    UniqueConstraint
 )
+import uuid
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -20,6 +22,66 @@ class Base(DeclarativeBase):
     """Base class for all models"""
 
     pass
+
+
+class User(Base):
+    """Real user accounts for SaaS model"""
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True, default=lambda: str(uuid.uuid4()))
+    username: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(String(20), default="trader")  # admin, trader, viewer
+    
+    # Security & Status
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_whitelisted: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_blacklisted: Mapped[bool] = mapped_column(Boolean, default=False)
+    
+    # Metadata
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UserLoginLog(Base):
+    """Detailed logs for user logins (IP, Geo, OS, Browser)"""
+
+    __tablename__ = "user_login_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(50), ForeignKey("users.id"), index=True)
+    ip_address: Mapped[str] = mapped_column(String(45), nullable=False)
+    user_agent: Mapped[str] = mapped_column(Text, nullable=True)
+    
+    # Parsed Client Data
+    os: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    browser: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    device_type: Mapped[str | None] = mapped_column(String(50), nullable=True)  # mobile, tablet, desktop
+    
+    # Geo Data
+    country: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class SystemNotification(Base):
+    """Global or targeted notifications sent by Admin/Web Mẹ"""
+
+    __tablename__ = "system_notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    target_user_id: Mapped[str | None] = mapped_column(String(50), ForeignKey("users.id"), nullable=True, index=True) # NULL means global
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    level: Mapped[str] = mapped_column(String(20), default="info")  # info, warning, error, success
+    
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
 class BotConfig(Base):
@@ -36,6 +98,7 @@ class BotConfig(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     approval_mode: Mapped[bool] = mapped_column(Boolean, default=False)  # If True, requires manual approval for trades
+    user_id: Mapped[str] = mapped_column(String(50), default="admin", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (Index("ix_bot_config_is_active", "is_active"),)
@@ -109,6 +172,7 @@ class Decision(Base):
     # Approval tracking
     approved_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    user_id: Mapped[str] = mapped_column(String(50), default="admin", index=True)
 
 
 class Signal(Base):
@@ -124,6 +188,7 @@ class Signal(Base):
     probability: Mapped[float] = mapped_column(Float, nullable=False)
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE")  # ACTIVE, TRIGGERED, EXPIRED, CANCELLED
+    user_id: Mapped[str] = mapped_column(String(50), default="admin", index=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
@@ -137,6 +202,7 @@ class RiskLog(Base):
     trace_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     result: Mapped[str] = mapped_column(String(20), nullable=False)  # approved|rejected|modified
     reason: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[str] = mapped_column(String(50), default="admin", index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -150,6 +216,7 @@ class OrderIntent(Base):
     client_order_id: Mapped[str] = mapped_column(String(50), nullable=False, unique=True, index=True)
     payload_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)  # pending|executed|failed
+    user_id: Mapped[str] = mapped_column(String(50), default="admin", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -166,6 +233,7 @@ class Order(Base):
     order_type: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    user_id: Mapped[str] = mapped_column(String(50), default="admin", index=True)
     filled_qty: Mapped[float] = mapped_column(Float, default=0.0)
     avg_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -185,6 +253,7 @@ class Position(Base):
     qty: Mapped[float] = mapped_column(Float, nullable=False)
     entry_price: Mapped[float] = mapped_column(Float, nullable=False)
     unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    user_id: Mapped[str] = mapped_column(String(50), default="admin", index=True)
     
     # Stop-loss and Take-profit order IDs
     sl_order_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -221,6 +290,7 @@ class TradeJournal(Base):
     features_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     decision_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     exit_reason: Mapped[str] = mapped_column(String(50), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(50), default="admin", index=True)
     closed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
@@ -235,6 +305,7 @@ class Event(Base):
     code: Mapped[str] = mapped_column(String(50), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     trace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    user_id: Mapped[str] = mapped_column(String(50), default="admin", index=True)
     data_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
@@ -248,6 +319,7 @@ class AuditLog(Base):
     actor: Mapped[str] = mapped_column(String(50), nullable=False)  # system|user|api
     action: Mapped[str] = mapped_column(String(100), nullable=False)
     target: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    user_id: Mapped[str] = mapped_column(String(50), default="admin", index=True)
     details_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
@@ -259,6 +331,7 @@ class LearningReport(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     analysis_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    user_id: Mapped[str] = mapped_column(String(50), default="admin", index=True)
     recommendations_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
@@ -270,6 +343,7 @@ class TraderContext(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     trader_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(50), default="admin", index=True)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
 
 
@@ -298,3 +372,39 @@ class NewsLog(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+class ChatMessage(Base):
+    """Dialogue history between user and AI agent"""
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # user|assistant
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    symbol: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    user_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True) # Unified field name
+
+class UserCredential(Base):
+    """Encrypted per-user credentials and custom AI settings"""
+
+    __tablename__ = "user_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(50), ForeignKey("users.id"), unique=True, index=True)
+    
+    # Binance (Encrypted)
+    binance_api_key: Mapped[str | None] = mapped_column(Text, nullable=True) # AES-256 Encrypted
+    binance_api_secret: Mapped[str | None] = mapped_column(Text, nullable=True) # AES-256 Encrypted
+    use_testnet: Mapped[bool] = mapped_column(Boolean, default=True)
+    
+    # Encryption Metadata
+    encryption_version: Mapped[int] = mapped_column(Integer, default=1)
+    key_v: Mapped[str | None] = mapped_column(String(50), nullable=True) # Key version or hint
+    
+    # AI / LLM Preference
+    ai_provider: Mapped[str] = mapped_column(String(20), default="openai")  # openai, anthropic, gemini, manual
+    ai_api_key: Mapped[str | None] = mapped_column(Text, nullable=True) # Encrypted
+    ai_model: Mapped[str] = mapped_column(String(50), default="gpt-4")
+    ai_custom_endpoint: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

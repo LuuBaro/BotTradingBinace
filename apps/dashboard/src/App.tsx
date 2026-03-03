@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
 import { useAuthStore } from './store'
 import { Layout } from './components/Layout'
@@ -11,9 +11,21 @@ import { TradeHistoryPage } from './pages/TradeHistoryPage'
 import { RiskConfigPage } from './pages/RiskConfigPage'
 import { SystemHealthPage } from './pages/SystemHealthPage'
 import { EventsPage } from './pages/EventsPage'
+import { NeuralConsolePage } from './pages/NeuralConsolePage'
+import { NeuralPortalPage } from './pages/NeuralPortalPage'
 import { LearningPage } from './pages/LearningPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { IntelPage } from './pages/IntelPage'
+import { AdminPanelPage } from './pages/AdminPanelPage'
+import { useLocation } from 'react-router-dom'
+
+const AdminRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { user } = useAuthStore()
+  if (user?.role?.toLowerCase() !== 'admin') {
+    return <Navigate to="/" replace />
+  }
+  return <>{children}</>
+}
 
 function App() {
   const { isAuthenticated } = useAuthStore()
@@ -21,7 +33,7 @@ function App() {
 
   useEffect(() => {
     // Check if token is still valid
-    const token = localStorage.getItem('token')
+    localStorage.getItem('token')
     setLoading(false)
   }, [])
 
@@ -51,7 +63,10 @@ function App() {
           <Route path="/system-health" element={<SystemHealthPage />} />
           <Route path="/events" element={<EventsPage />} />
           <Route path="/learning" element={<LearningPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/terminal" element={<NeuralConsolePage />} />
+          <Route path="/portal" element={<NeuralPortalPage />} />
+          <Route path="/settings" element={<AdminRoute><SettingsPage /></AdminRoute>} />
+          <Route path="/admin" element={<AdminRoute><AdminPanelPage /></AdminRoute>} />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
       </Layout>

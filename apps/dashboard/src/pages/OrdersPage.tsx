@@ -1,8 +1,9 @@
 import React, { useEffect, useState, useMemo } from 'react'
+import { useLocation } from 'react-router-dom'
 import { useDashboardStore, Order } from '../store'
 import { createApiClient, getApiBaseUrl } from '../api/client'
 import { formatDistanceToNow, format } from 'date-fns'
-import { Terminal, CheckCircle2, XCircle, ArrowUpRight, ArrowDownRight, RefreshCw, Layers, X, Info, Hash, Activity, ChevronDown, Search, Filter } from 'lucide-react'
+import { Terminal, CheckCircle2, XCircle, ArrowUpRight, ArrowDownRight, RefreshCw, Layers, X, Hash, Activity, ChevronDown, Search, Filter } from 'lucide-react'
 
 // Custom Premium Select Component
 const CustomSelect: React.FC<{
@@ -67,6 +68,7 @@ const CustomSelect: React.FC<{
 };
 
 export const OrdersPage: React.FC = () => {
+  const location = useLocation()
   const { orders, setOrders } = useDashboardStore()
   const [filter, setFilter] = useState<'open' | 'filled' | 'cancelled' | 'all'>('all')
   const [refreshKey, setRefreshKey] = useState(0)
@@ -75,10 +77,8 @@ export const OrdersPage: React.FC = () => {
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
   const [searchQuery, setSearchQuery] = useState('')
-
-  // Memoized API client
   const token = localStorage.getItem('token') || ''
-  const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token])
+  const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token, location.search])
 
   useEffect(() => {
     const fetchOrders = async () => {
@@ -101,7 +101,7 @@ export const OrdersPage: React.FC = () => {
     if (filter === 'open') return ['NEW', 'PARTIALLY_FILLED'].includes(status)
     if (filter === 'cancelled') return status === 'CANCELLED'
     if (filter === 'filled') return status === 'FILLED'
-    return status === filter.toUpperCase()
+    return false
   }), [orders, filter])
 
   const filteredOrders = useMemo(() => {

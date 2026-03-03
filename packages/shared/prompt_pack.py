@@ -340,12 +340,12 @@ class PromptPackSchema(BaseModel):
 
     def to_json(self) -> str:
         """Serialize to JSON for LLM prompt"""
-        return self.json(indent=2)
+        return self.model_dump_json(indent=2)
 
     @classmethod
     def from_json(cls, json_str: str) -> "PromptPackSchema":
         """Deserialize from JSON"""
-        return cls.parse_raw(json_str)
+        return cls.model_validate_json(json_str)
 
 
 class PromptPackSummary(BaseModel):

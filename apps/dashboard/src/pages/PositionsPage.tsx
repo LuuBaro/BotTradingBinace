@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { useDashboardStore } from '../store'
 import { createApiClient, getApiBaseUrl } from '../api/client'
 import { formatDistanceToNow } from 'date-fns'
@@ -7,6 +7,7 @@ import { Activity, TrendingUp, TrendingDown, Zap, Clock, X, Edit3, Share2, Ancho
 
 export const PositionsPage: React.FC = () => {
   const navigate = useNavigate()
+  const location = useLocation()
   const { positions, setPositions, orders, setOrders } = useDashboardStore()
   const [loading, setLoading] = useState(true)
   const [refreshKey, setRefreshKey] = useState(0)
@@ -17,7 +18,7 @@ export const PositionsPage: React.FC = () => {
 
   // Memoized API client
   const token = localStorage.getItem('token') || ''
-  const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token])
+  const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token, location.search])
 
   const fetchData = async () => {
     try {
@@ -231,7 +232,7 @@ export const PositionsPage: React.FC = () => {
                   const isProfit = pnl >= 0
                   const leverage = pos.leverage || 1
                   const margin = (pos.entry_price * pos.qty) / leverage
-                  
+
                   // Get correct side from both old and new API formats
                   const sideStr = (pos.side || pos.binance_data?.positionAmt || '').toString()
                   const isLong = sideStr.toUpperCase().includes('LONG') || (parseFloat(sideStr) > 0)

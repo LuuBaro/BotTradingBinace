@@ -60,6 +60,7 @@ class ExecutionEngine:
         decision: Decision,
         trace_id: str,
         session: AsyncSession,
+        user_id: str,
     ) -> None:
         """
         ✅ CRITICAL VALIDATION: Ensure position size does NOT exceed limits
@@ -73,8 +74,8 @@ class ExecutionEngine:
         Raises:
             ValueError: If position size exceeds configured limits
         """
-        # Get current positions to check total
-        existing_positions = await session.execute(select(PositionModel))
+        # Get current positions for this user
+        existing_positions = await session.execute(select(PositionModel).where(PositionModel.user_id == user_id))
         positions = existing_positions.scalars().all()
         
         # Get balance
@@ -122,9 +123,10 @@ class ExecutionEngine:
 
     async def execute_decision(
         self,
+        session: AsyncSession,
+        user_id: str,
         decision: Decision,
         trace_id: str,
-        session: AsyncSession,
     ) -> dict:
         """
         Execute a trading decision with idempotency
@@ -144,16 +146,17 @@ class ExecutionEngine:
 
         # Handle CLOSE action
         if decision.action == ActionType.CLOSE:
-            return await self._close_position(decision, trace_id, session)
+            return await self._close_position(session, user_id, decision, trace_id)
 
         # Handle OPEN action
-        return await self._open_position(decision, trace_id, session)
+        return await self._open_position(session, user_id, decision, trace_id)
 
     async def _open_position(
         self,
+        session: AsyncSession,
+        user_id: str,
         decision: Decision,
         trace_id: str,
-        session: AsyncSession,
     ) -> dict:
         """Open a new position"""
         # ✅ CRITICAL: Validate position size EXPLICITLY before execution
@@ -161,15 +164,16 @@ class ExecutionEngine:
         await self._validate_position_size_explicitly(
             decision=decision,
             trace_id=trace_id,
-            session=session
+            session=session,
+            user_id=user_id
         )
         
         # Generate deterministic client_order_id
         client_order_id = f"{trace_id[:8]}_{decision.symbol}_{int(datetime.utcnow().timestamp())}"
 
-        # Check idempotency: has this trace_id been executed?
+        # Check idempotency: has this trace_id been executed for THIS user?
         existing_intent = await session.execute(
-            select(OrderIntentModel).where(OrderIntentModel.trace_id == trace_id)
+            select(OrderIntentModel).where(OrderIntentModel.trace_id == trace_id, OrderIntentModel.user_id == user_id)
         )
         existing = existing_intent.scalar_one_or_none()
 
@@ -183,6 +187,7 @@ class ExecutionEngine:
 
         # Create order intent record (pending)
         intent = OrderIntentModel(
+            user_id=user_id,
             trace_id=trace_id,
             client_order_id=client_order_id,
             payload_json=decision.model_dump(),
@@ -268,6 +273,7 @@ class ExecutionEngine:
 
             # Create order record
             order = OrderModel(
+                user_id=user_id,
                 client_order_id=client_order_id,
                 exchange_order_id=order_data["order_id"],
                 symbol=decision.symbol,
@@ -305,7 +311,7 @@ class ExecutionEngine:
 
             # Create/update position
             await self._create_position(
-                decision, filled_order, trace_id, session
+                session, user_id, decision, filled_order, trace_id
             )
 
             # Create SL/TP orders if specified
@@ -313,18 +319,19 @@ class ExecutionEngine:
             tp_order_id = None
             
             if decision.stop_loss:
-                sl_order_id = await self._create_sl_order(decision, quantity, trace_id, session)
+                sl_order_id = await self._create_sl_order(session, user_id, decision, quantity, trace_id)
             if decision.take_profit:
-                tp_order_id = await self._create_tp_order(decision, quantity, trace_id, session)
+                tp_order_id = await self._create_tp_order(session, user_id, decision, quantity, trace_id)
             
             # Update position with SL/TP order IDs
             if sl_order_id or tp_order_id:
                 await self._update_position_sl_tp(
-                    decision.symbol, sl_order_id, tp_order_id, session
+                    session, user_id, decision.symbol, sl_order_id, tp_order_id
                 )
 
             # Log event
             event = EventModel(
+                user_id=user_id,
                 timestamp=datetime.utcnow(),
                 level="INFO",
                 code="ORDER_FILLED",
@@ -336,6 +343,7 @@ class ExecutionEngine:
 
             # Audit log
             audit = AuditLogModel(
+                user_id=user_id,
                 timestamp=datetime.utcnow(),
                 actor="system",
                 action="place_order",
@@ -391,21 +399,23 @@ class ExecutionEngine:
 
     async def _create_position(
         self,
+        session: AsyncSession,
+        user_id: str,
         decision: Decision,
         filled_order: dict,
         trace_id: str,
-        session: AsyncSession,
     ) -> None:
         """Create or update position record"""
-        # Check existing position
+        # Check existing position for THIS user
         existing_pos = await session.execute(
-            select(PositionModel).where(PositionModel.symbol == decision.symbol)
+            select(PositionModel).where(PositionModel.symbol == decision.symbol, PositionModel.user_id == user_id)
         )
         position = existing_pos.scalar_one_or_none()
 
         if not position:
             # New position
             position = PositionModel(
+                user_id=user_id,
                 symbol=decision.symbol,
                 side=decision.side.value,
                 qty=filled_order["filled_qty"],
@@ -434,10 +444,11 @@ class ExecutionEngine:
 
     async def _create_sl_order(
         self,
+        session: AsyncSession,
+        user_id: str,
         decision: Decision,
         quantity: float,
         trace_id: str,
-        session: AsyncSession,
     ) -> str | None:
         """Create stop loss order, return order ID"""
         try:
@@ -476,6 +487,7 @@ class ExecutionEngine:
 
             # Create order record
             order = OrderModel(
+                user_id=user_id,
                 client_order_id=sl_client_order_id,
                 exchange_order_id=sl_order_id,
                 symbol=decision.symbol,
@@ -498,10 +510,11 @@ class ExecutionEngine:
 
     async def _create_tp_order(
         self,
+        session: AsyncSession,
+        user_id: str,
         decision: Decision,
         quantity: float,
         trace_id: str,
-        session: AsyncSession,
     ) -> str | None:
         """Create take profit order, return order ID"""
         try:
@@ -540,6 +553,7 @@ class ExecutionEngine:
 
             # Create order record
             order = OrderModel(
+                user_id=user_id,
                 client_order_id=tp_client_order_id,
                 exchange_order_id=tp_order_id,
                 symbol=decision.symbol,
@@ -562,14 +576,15 @@ class ExecutionEngine:
 
     async def _update_position_sl_tp(
         self,
+        session: AsyncSession,
+        user_id: str,
         symbol: str,
         sl_order_id: str | None,
         tp_order_id: str | None,
-        session: AsyncSession,
     ) -> None:
         """Update position with SL/TP order IDs"""
         result = await session.execute(
-            select(PositionModel).where(PositionModel.symbol == symbol)
+            select(PositionModel).where(PositionModel.symbol == symbol, PositionModel.user_id == user_id)
         )
         position = result.scalar_one_or_none()
         
@@ -582,14 +597,15 @@ class ExecutionEngine:
 
     async def _close_position(
         self,
+        session: AsyncSession,
+        user_id: str,
         decision: Decision,
         trace_id: str,
-        session: AsyncSession,
     ) -> dict:
         """Close an existing position"""
-        # Get position
+        # Get position for THIS user
         existing_pos = await session.execute(
-            select(PositionModel).where(PositionModel.symbol == decision.symbol)
+            select(PositionModel).where(PositionModel.symbol == decision.symbol, PositionModel.user_id == user_id)
         )
         position = existing_pos.scalar_one_or_none()
 
@@ -682,6 +698,7 @@ class ExecutionEngine:
         position_pct = (position_value / balance) if balance > 0 else 0.0
 
         trade = TradeJournalModel(
+            user_id=user_id,
             trace_id=trace_id,
             symbol=decision.symbol,
             side=side,
@@ -720,6 +737,7 @@ class ExecutionEngine:
 
         # Log event
         event = EventModel(
+            user_id=user_id,
             timestamp=datetime.utcnow(),
             level="INFO",
             code="POSITION_CLOSED",

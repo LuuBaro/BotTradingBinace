@@ -4,6 +4,7 @@ import { createApiClient, getApiBaseUrl } from '../api/client'
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts'
 import { formatDistanceToNow, format } from 'date-fns'
 import { Activity, Shield, TrendingUp, Server, Clock, Database, Brain, ChevronRight, Info } from 'lucide-react'
+import { useLocation } from 'react-router-dom'
 
 export const OverviewPage: React.FC = () => {
   const {
@@ -11,6 +12,7 @@ export const OverviewPage: React.FC = () => {
     orders, setOrders, pnlToday, setPnlToday, latency,
     setLatency, setHealth, setDecisions
   } = useDashboardStore()
+  const location = useLocation()
   const { events } = useEventsStore()
   const [latestDecision, setLatestDecision] = useState<any>(null)
   const [pnlHistory, setPnlHistory] = useState<any[]>([])
@@ -22,7 +24,7 @@ export const OverviewPage: React.FC = () => {
 
   // Memoized API client
   const token = localStorage.getItem('token') || ''
-  const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token])
+  const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token, location.search])
 
   useEffect(() => {
     const fetchData = async () => {
@@ -282,10 +284,10 @@ export const OverviewPage: React.FC = () => {
                           <div className="flex justify-between items-center">
                             <div className="space-y-1">
                               <div className="text-[10px] text-slate-400 uppercase tracking-wide font-semibold">Net PnL (All-Time)</div>
-                              <div className="text-[9px] text-purple-300/60">Từ vốn ban đầu ${walletBalance?.initial_balance?.toLocaleString('en-US', { minimumFractionDigits: 2 }) || '5,000.00'}</div>
+                              <div className="text-[9px] text-purple-300/60">Từ vốn ban đầu ${walletBalance?.initial_balance?.toLocaleString('en-US', { minimumFractionDigits: 2 }) || (walletBalance?.initial_balance === 0 ? '0.00' : '5,000.00')}</div>
                             </div>
-                            <div className={`text-xl font-black font-mono ${(walletBalance?.wallet_balance || 0) - (walletBalance?.initial_balance || 5000) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                              {(walletBalance?.wallet_balance || 0) - (walletBalance?.initial_balance || 5000) >= 0 ? '+' : ''}${((walletBalance?.wallet_balance || 0) - (walletBalance?.initial_balance || 5000)).toFixed(2)}
+                            <div className={`text-xl font-black font-mono ${(walletBalance?.wallet_balance || 0) - (walletBalance?.initial_balance ?? 5000) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {(walletBalance?.wallet_balance || 0) - (walletBalance?.initial_balance ?? 5000) >= 0 ? '+' : ''}${((walletBalance?.wallet_balance || 0) - (walletBalance?.initial_balance ?? 5000)).toFixed(2)}
                             </div>
                           </div>
                         </div>

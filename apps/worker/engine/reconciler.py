@@ -34,7 +34,7 @@ class ReconcilerEngine:
             exchange_type="binance" if self.is_binance else "mock",
         )
 
-    async def reconcile(self, session: AsyncSession) -> Dict[str, Any]:
+    async def reconcile(self, session: AsyncSession, user_id: str = "admin") -> Dict[str, Any]:
         """
         Full reconciliation cycle
         
@@ -50,7 +50,7 @@ class ReconcilerEngine:
 
         try:
             # Get DB positions
-            db_positions = await self._get_db_positions(session)
+            db_positions = await self._get_db_positions(session, user_id=user_id)
             
             # Get exchange positions
             exchange_positions = await self._get_exchange_positions()
@@ -62,7 +62,7 @@ class ReconcilerEngine:
             summary["position_mismatches"] = position_mismatches
             
             # Get DB orders
-            db_orders = await self._get_db_orders(session)
+            db_orders = await self._get_db_orders(session, user_id=user_id)
             
             # Get exchange open orders
             exchange_orders = await self._get_exchange_orders()
@@ -112,9 +112,9 @@ class ReconcilerEngine:
             await session.commit()
             raise
 
-    async def _get_db_positions(self, session: AsyncSession) -> List[Dict[str, Any]]:
-        """Get all positions from database"""
-        result = await session.execute(select(PositionModel))
+    async def _get_db_positions(self, session: AsyncSession, user_id: str) -> List[Dict[str, Any]]:
+        """Get all positions from database for a specific user"""
+        result = await session.execute(select(PositionModel).where(PositionModel.user_id == user_id))
         positions = result.scalars().all()
         
         return [
@@ -156,10 +156,11 @@ class ReconcilerEngine:
             logger.error("get_exchange_positions_failed", error=str(e))
             return []
 
-    async def _get_db_orders(self, session: AsyncSession) -> List[Dict[str, Any]]:
-        """Get all non-filled orders from database"""
+    async def _get_db_orders(self, session: AsyncSession, user_id: str) -> List[Dict[str, Any]]:
+        """Get all non-filled orders from database for a specific user"""
         result = await session.execute(
             select(OrderModel).where(
+                OrderModel.user_id == user_id,
                 OrderModel.status.in_(["new", "partially_filled"])
             )
         )
@@ -318,7 +319,7 @@ class ReconcilerEngine:
         
         return mismatches
 
-    async def sync_positions(self, session: AsyncSession) -> None:
+    async def sync_positions(self, session: AsyncSession, user_id: str = "admin") -> None:
         """
         Force sync positions from exchange to DB
         (Auto-heal mismatches)
@@ -340,8 +341,8 @@ class ReconcilerEngine:
                 logger.debug(f"reconciler_map_ex_pos: {p['symbol']} {side} {p['qty']}")
                 ex_map[(p["symbol"], side.lower())] = p
 
-            # 3. Fetch existing positions from DB
-            result = await session.execute(select(PositionModel))
+            # 3. Fetch existing positions from DB for this user
+            result = await session.execute(select(PositionModel).where(PositionModel.user_id == user_id))
             db_positions = result.scalars().all()
             
             # 4. Update or delete existing DB positions
@@ -378,6 +379,7 @@ class ReconcilerEngine:
                     entry_price=ex_pos["entry_price"],
                     leverage=ex_pos["leverage"],
                     liquidation_price=ex_pos["liquidation_price"],
+                    user_id=user_id
                 )
                 session.add(new_pos)
             

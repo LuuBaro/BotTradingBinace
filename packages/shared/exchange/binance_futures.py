@@ -19,14 +19,22 @@ class BinanceFuturesClient:
     Supports both testnet and production
     """
 
-    def __init__(self):
-        self.api_key = settings.binance_api_key
-        self.api_secret = settings.binance_api_secret
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        api_secret: Optional[str] = None,
+        testnet: Optional[bool] = None
+    ):
+        self.api_key = api_key or settings.binance_api_key
+        self.api_secret = api_secret or settings.binance_api_secret
+        
+        # Determine testnet status
+        use_testnet = testnet if testnet is not None else settings.binance_testnet
         
         # Base URL from settings or auto-select based on testnet flag
         if settings.binance_base_url:
             self.base_url = settings.binance_base_url
-        elif settings.binance_testnet:
+        elif use_testnet:
             self.base_url = "https://testnet.binancefuture.com"
         else:
             self.base_url = "https://fapi.binance.com"
@@ -36,7 +44,7 @@ class BinanceFuturesClient:
         
         logger.info(
             "binance_client_initialized",
-            testnet=settings.binance_testnet,
+            testnet=use_testnet,
             base_url=self.base_url,
         )
 
@@ -180,7 +188,11 @@ class BinanceFuturesClient:
             )
             raise
 
-    # === Account endpoints ===
+    async def get_exchange_info(self) -> Dict[str, Any]:
+        """Get exchange information including all symbols"""
+        return await self._request("GET", "/fapi/v1/exchangeInfo")
+
+    # ===== Account Endpoints =====
 
     async def get_account_balance(self) -> List[Dict[str, Any]]:
         """Get futures account balance"""
@@ -216,7 +228,7 @@ class BinanceFuturesClient:
         result = await self._request("GET", "/fapi/v2/positionRisk", params=params, signed=True)
         return result
 
-    async def get_user_trades(self, limit: int = 50) -> List[Dict[str, Any]]:
+    async def get_income_history(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Fetch recent REALIZED_PNL events (which map directly to closed positions) across ALL symbols"""
         params = {"incomeType": "REALIZED_PNL", "limit": limit}
         try:

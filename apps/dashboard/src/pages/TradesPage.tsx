@@ -1,9 +1,14 @@
 import React, { useEffect, useState, useMemo } from 'react'
+import { useLocation } from 'react-router-dom'
 import { createApiClient, getApiBaseUrl } from '../api/client'
-import { format } from 'date-fns'
+import { format, addHours } from 'date-fns'
 import { Brain, Shield, Zap, TrendingUp, Target, CheckCircle2, XCircle, Info, RefreshCw, ChevronRight } from 'lucide-react'
 
+// Helper: Convert UTC to Vietnam time (UTC+7)
+const toVietnamTime = (utcDate: Date) => addHours(utcDate, 7)
+
 export const TradesPage: React.FC = () => {
+  const location = useLocation()
   const [trades, setTrades] = useState<any[]>([])
   const [selectedTrace, setSelectedTrace] = useState<string | null>(null)
   const [traceDetails, setTraceDetails] = useState<any>(null)
@@ -12,7 +17,7 @@ export const TradesPage: React.FC = () => {
 
   // Memoized API client
   const token = localStorage.getItem('token') || ''
-  const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token])
+  const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token, location.search])
 
   useEffect(() => {
     const fetchDecisions = async () => {
@@ -82,7 +87,7 @@ export const TradesPage: React.FC = () => {
               <table className="table">
                 <thead>
                   <tr className="bg-white/5">
-                    <th className="rounded-tl-xl">Time (UTC)</th>
+                    <th className="rounded-tl-xl">Thời gian (VN)</th>
                     <th>Asset</th>
                     <th>Neural Intent</th>
                     <th className="text-right">Sizing / Lev</th>
@@ -108,7 +113,7 @@ export const TradesPage: React.FC = () => {
                         onClick={() => handleViewTrace(trade.trace_id)}
                       >
                         <td className="text-xs font-mono text-slate-500">
-                          {format(new Date(trade.timestamp), 'HH:mm:ss.SSS')}
+                          {format(toVietnamTime(new Date(trade.timestamp)), 'HH:mm:ss.SSS')}
                         </td>
                         <td className="font-black font-mono text-blue-100 italic">{trade.symbol}</td>
                         <td className="relative">

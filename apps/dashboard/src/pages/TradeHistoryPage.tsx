@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useMemo } from 'react'
 import { createApiClient, getApiBaseUrl } from '../api/client'
+import { useLocation } from 'react-router-dom'
 import { format, formatDistanceToNow } from 'date-fns'
 import { RefreshCw, TrendingUp, History, Search, Download, Filter, ChevronDown, Layers, CheckCircle2, XCircle, Activity, X, Hash, ArrowUpRight, ArrowDownRight, Zap } from 'lucide-react'
 
@@ -66,6 +67,7 @@ const CustomSelect: React.FC<{
 };
 
 export const TradeHistoryPage: React.FC = () => {
+    const location = useLocation()
     const [trades, setTrades] = useState<any[]>([])
     const [loading, setLoading] = useState(false)
     const [refreshKey, setRefreshKey] = useState(0)
@@ -77,7 +79,7 @@ export const TradeHistoryPage: React.FC = () => {
 
     // Memoized API client
     const token = localStorage.getItem('token') || ''
-    const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token])
+    const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token, location.search])
 
     useEffect(() => {
         const fetchTrades = async () => {

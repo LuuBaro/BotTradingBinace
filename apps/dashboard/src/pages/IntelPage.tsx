@@ -1,11 +1,12 @@
 import React, { useEffect, useState, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { createApiClient, getApiBaseUrl } from '../api/client'
 import { format } from 'date-fns'
 import { Brain, Shield, Zap, TrendingUp, TrendingDown, AlertTriangle, Target, Search, CheckCircle } from 'lucide-react'
 
 export const IntelPage: React.FC = () => {
     const navigate = useNavigate()
+    const location = useLocation()
     const [signals, setSignals] = useState<any[]>([])
     const [loading, setLoading] = useState(true)
     const [approvalMode, setApprovalMode] = useState(false)
@@ -21,7 +22,7 @@ export const IntelPage: React.FC = () => {
 
     // Explicitly create API client to avoid re-creation issues in hooks
     const token = localStorage.getItem('token') || ''
-    const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token])
+    const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token, location.search])
 
     const fetchSignals = async () => {
         try {

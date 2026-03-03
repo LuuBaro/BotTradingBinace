@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react'
+import { useLocation } from 'react-router-dom'
 import { useEventsStore } from '../store'
 import { createApiClient, getApiBaseUrl } from '../api/client'
 import { formatDistanceToNow, format } from 'date-fns'
@@ -13,19 +14,29 @@ const formatSystemLog = (message: string) => {
   if (text.includes('Worker active. Monitoring')) {
     const parts = text.match(/Monitoring (\d+) symbols/)
     const count = parts ? parts[1] : ''
-    text = `Worker Framework đang khởi chạy ở chế độ ngầm. Đang giám sát ${count} cặp giao dịch (Symbols).`
+    text = `Worker Framework đang khởi chạy ở chế độ ngầm.Đang giám sát ${count} cặp giao dịch(Symbols).`
   } else if (text.includes('Fetching historical data')) {
-    text = `Đang đồng bộ dữ liệu lịch sử nến (Klines) cho Neural Engine...`
+    text = `Đang đồng bộ dữ liệu lịch sử nến(Klines) cho Neural Engine...`
   } else if (text.includes('Not enough historical trades')) {
-    text = `Thiếu hụt Data mẫu trong Database. Yêu cầu nạp thêm dữ liệu để tiếp tục huấn luyện AI.`
+    text = `Thiếu hụt Data mẫu trong Database.Yêu cầu nạp thêm dữ liệu để tiếp tục huấn luyện AI.`
   } else if (text.includes('Waiting for approval')) {
-    text = `AI đã lên phương án Trade. Đang chờ xác nhận từ Quản trị viên (Manual Approval).`
+    text = `AI đã lên phương án Trade.Đang chờ xác nhận từ Quản trị viên(Manual Approval).`
   } else if (text.includes('Order placed successfully')) {
     text = `Bot đã đặt lệnh thành công lên sàn Binance.`
   } else if (text.includes('Worker sleeping')) {
     text = `Nhịp Worker tạm nghỉ chờ phiên làm việc tiếp theo.`
   } else if (text.includes('Syncing fallback trades')) {
     text = `Đang gọi API đồng bộ dự phòng lịch sử lệnh vào Database.`
+  } else if (text.includes('Khởi động chu kỳ quét')) {
+    text = `🔄 ${text} `
+  } else if (text.includes('Đang quét dữ liệu thị trường')) {
+    text = `🔍 ${text} `
+  } else if (text.includes('AI đã soi')) {
+    text = `💎 ${text} `
+  } else if (text.includes('AI phát hiện tín hiệu')) {
+    text = `🚀 ${text} `
+  } else if (text.includes('Lỗi phân tích AI')) {
+    text = `⚠️ ${text} `
   }
 
   // Common keyword bolding
@@ -33,13 +44,14 @@ const formatSystemLog = (message: string) => {
 }
 
 export const EventsPage: React.FC = () => {
+  const location = useLocation()
   const { events, setEvents } = useEventsStore()
   const [auditLog, setAuditLog] = useState<any[]>([])
   const [filter, setFilter] = useState<'all' | 'error' | 'warning' | 'info'>('all')
   const [loading, setLoading] = useState(false)
 
   const token = localStorage.getItem('token') || ''
-  const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token])
+  const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token, location.search])
 
   useEffect(() => {
     const fetchAuditData = async () => {
@@ -87,10 +99,10 @@ export const EventsPage: React.FC = () => {
             <button
               key={f}
               onClick={() => setFilter(f)}
-              className={`px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${filter === f
-                ? 'bg-purple-600 text-white shadow-lg shadow-purple-500/20'
-                : 'text-slate-500 hover:text-slate-300'
-                }`}
+              className={`px - 4 py - 2 text - [10px] font - black uppercase tracking - widest rounded - xl transition - all ${filter === f
+                  ? 'bg-purple-600 text-white shadow-lg shadow-purple-500/20'
+                  : 'text-slate-500 hover:text-slate-300'
+                } `}
             >
               {f}
             </button>
@@ -124,10 +136,10 @@ export const EventsPage: React.FC = () => {
                   <div key={event.id || idx} className="p-5 hover:bg-white/[0.02] transition-colors group">
                     <div className="flex gap-5">
                       <div className="flex flex-col items-center gap-2 pt-1">
-                        <div className={`p-1.5 rounded-lg ${event.level.toLowerCase() === 'error' ? 'bg-rose-500/20 text-rose-400' :
-                          event.level.toLowerCase() === 'warning' ? 'bg-amber-500/20 text-amber-400' :
-                            'bg-blue-500/20 text-blue-400'
-                          }`}>
+                        <div className={`p - 1.5 rounded - lg ${event.level.toLowerCase() === 'error' ? 'bg-rose-500/20 text-rose-400' :
+                            event.level.toLowerCase() === 'warning' ? 'bg-amber-500/20 text-amber-400' :
+                              'bg-blue-500/20 text-blue-400'
+                          } `}>
                           {event.level.toLowerCase() === 'error' ? <AlertOctagon size={14} /> :
                             event.level.toLowerCase() === 'warning' ? <AlertTriangle size={14} /> :
                               <Info size={14} />}
@@ -136,10 +148,10 @@ export const EventsPage: React.FC = () => {
                       </div>
                       <div className="flex-1 space-y-1">
                         <div className="flex justify-between items-center">
-                          <span className={`text-[9px] font-black uppercase tracking-widest flex items-center gap-1.5 ${event.level.toLowerCase() === 'error' ? 'text-rose-500' :
-                            event.level.toLowerCase() === 'warning' ? 'text-amber-500' :
-                              'text-blue-500'
-                            }`}>
+                          <span className={`text - [9px] font - black uppercase tracking - widest flex items - center gap - 1.5 ${event.level.toLowerCase() === 'error' ? 'text-rose-500' :
+                              event.level.toLowerCase() === 'warning' ? 'text-amber-500' :
+                                'text-blue-500'
+                            } `}>
                             <Code2 size={10} className="opacity-70" />
                             NODE_EVENT // {event.id ? String(event.id).slice(0, 8) : 'SYSTEM'}
                           </span>

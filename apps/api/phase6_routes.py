@@ -17,7 +17,11 @@ import asyncio
 from datetime import timezone
 from packages.shared.exchange.binance_futures import BinanceFuturesClient
 from packages.shared.config import settings
+from apps.api.auth import jwt_handler
+from apps.api.phase4_routes import _get_target_user_id
+from fastapi.security import HTTPBearer
 
+security = HTTPBearer()
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["phase6-learning"])
@@ -96,12 +100,12 @@ def _model_to_entry(trade: TradeJournalModel) -> TradeJournalEntry:
     )
 
 
-async def _get_learning_agent_from_db() -> LearningAgent:
+async def _get_learning_agent_from_db(user_id: str) -> LearningAgent:
     agent = LearningAgent()
     async with AsyncSessionFactory() as session:
         from sqlalchemy import select
         result = await session.execute(
-            select(TradeJournalModel).order_by(TradeJournalModel.closed_at.desc())
+            select(TradeJournalModel).where(TradeJournalModel.user_id == user_id).order_by(TradeJournalModel.closed_at.desc())
         )
         trades = result.scalars().all()
         for trade in trades:
@@ -116,17 +120,16 @@ async def _get_learning_agent_from_db() -> LearningAgent:
 @router.post("/trade-journal")
 async def record_trade(
     trade: TradeJournalEntry,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    credentials: Any = Depends(security)
 ) -> Dict[str, Any]:
     """
     Record a completed trade in journal
-    
-    Args:
-        trade: Complete trade record
-        
-    Returns:
-        Confirmation with trade_id
     """
+    user = await jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
     try:
         async with AsyncSessionFactory() as session:
             record = TradeJournalModel(
@@ -161,16 +164,17 @@ async def record_trade(
                 decision_json=trade.decision_json,
                 exit_reason=trade.exit_reason.value,
                 closed_at=trade.exit_time,
+                user_id=user.id
             )
             session.add(record)
             await session.commit()
-
+            
         logger.info(f"✅ Trade recorded: {trade.trade_id} {trade.symbol} {trade.side} {trade.pnl_pct:+.2%}")
 
         # Check if we should trigger learning analysis
-        agent = await _get_learning_agent_from_db()
+        agent = await _get_learning_agent_from_db(user.id)
         if len(agent.trades) % 50 == 0:
-            background_tasks.add_task(_trigger_learning_analysis)
+            background_tasks.add_task(_trigger_learning_analysis, user.id)
 
         return {
             "success": True,
@@ -190,23 +194,22 @@ async def list_trades(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     symbol: Optional[str] = None,
-    status: Optional[str] = None  # winner, loser
+    status: Optional[str] = None,  # winner, loser
+    user_id: str | None = None,
+    credentials: Any = Depends(security)
 ) -> Dict[str, Any]:
     """
     List completed trades
-    
-    Args:
-        limit: Number of trades to return
-        offset: Pagination offset
-        symbol: Filter by symbol
-        status: Filter by winner/loser
-        
-    Returns:
-        List of trade journal entries
     """
+    requester = await jwt_handler.verify_token(credentials.credentials)
+    if not requester:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    target_id = _get_target_user_id(requester, user_id)
+    
     async with AsyncSessionFactory() as session:
         from sqlalchemy import select
-        query = select(TradeJournalModel)
+        query = select(TradeJournalModel).where(TradeJournalModel.user_id == target_id)
         if symbol:
             query = query.where(TradeJournalModel.symbol == symbol)
         result = await session.execute(query.order_by(TradeJournalModel.closed_at.desc()))
@@ -231,12 +234,25 @@ async def list_trades(
 
 
 @router.get("/trade-journal/{trade_id}")
-async def get_trade_details(trade_id: str) -> Dict[str, Any]:
+async def get_trade_details(
+    trade_id: str,
+    user_id: str | None = None,
+    credentials: Any = Depends(security)
+) -> Dict[str, Any]:
     """Get specific trade details"""
+    requester = await jwt_handler.verify_token(credentials.credentials)
+    if not requester:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    target_id = _get_target_user_id(requester, user_id)
+
     async with AsyncSessionFactory() as session:
         from sqlalchemy import select
         result = await session.execute(
-            select(TradeJournalModel).where(TradeJournalModel.id == trade_id.replace("trade_", ""))
+            select(TradeJournalModel).where(
+                TradeJournalModel.id == trade_id.replace("trade_", ""),
+                TradeJournalModel.user_id == target_id
+            )
         )
         trade = result.scalar_one_or_none()
         if not trade:
@@ -247,9 +263,18 @@ async def get_trade_details(trade_id: str) -> Dict[str, Any]:
 
 
 @router.get("/trade-journal/stats/summary")
-async def get_trade_stats_summary() -> Dict[str, Any]:
+async def get_trade_stats_summary(
+    user_id: str | None = None,
+    credentials: Any = Depends(security)
+) -> Dict[str, Any]:
     """Get quick summary stats from trades"""
-    agent = await _get_learning_agent_from_db()
+    requester = await jwt_handler.verify_token(credentials.credentials)
+    if not requester:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    target_id = _get_target_user_id(requester, user_id)
+    
+    agent = await _get_learning_agent_from_db(target_id)
     if not agent.trades:
         return {"message": "No trades yet"}
 
@@ -273,16 +298,21 @@ async def get_trade_stats_summary() -> Dict[str, Any]:
 
 @router.post("/learning/analyze")
 async def trigger_learning_analysis(
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    user_id: str | None = None,
+    credentials: Any = Depends(security)
 ) -> Dict[str, Any]:
     """
     Trigger learning analysis manually
-    
-    Returns:
-        Learning report
     """
+    requester = await jwt_handler.verify_token(credentials.credentials)
+    if not requester:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    target_id = _get_target_user_id(requester, user_id)
+    
     try:
-        agent = await _get_learning_agent_from_db()
+        agent = await _get_learning_agent_from_db(target_id)
         logger.info(f"Starting manual learning analysis on {len(agent.trades)} trades")
 
         report = agent.analyze()
@@ -339,15 +369,21 @@ async def get_learning_report(report_id: str) -> Dict[str, Any]:
 
 
 @router.get("/learning/patterns")
-async def get_losing_patterns() -> Dict[str, Any]:
+async def get_losing_patterns(
+    user_id: str | None = None,
+    credentials: Any = Depends(security)
+) -> Dict[str, Any]:
     """
     Get all discovered losing patterns
-    
-    Returns:
-        List of destructive patterns found
     """
+    requester = await jwt_handler.verify_token(credentials.credentials)
+    if not requester:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    target_id = _get_target_user_id(requester, user_id)
+    
     try:
-        agent = await _get_learning_agent_from_db()
+        agent = await _get_learning_agent_from_db(target_id)
         if not agent.trades:
             return {"patterns": []}
 
@@ -365,14 +401,21 @@ async def get_losing_patterns() -> Dict[str, Any]:
 
 
 @router.get("/learning/confidence-calibration")
-async def get_confidence_calibration() -> Dict[str, Any]:
+async def get_confidence_calibration(
+    user_id: str | None = None,
+    credentials: Any = Depends(security)
+) -> Dict[str, Any]:
     """
     Analyze AI confidence vs actual performance
-    
-    Shows how well AI confidence predicts win/loss
     """
+    requester = await jwt_handler.verify_token(credentials.credentials)
+    if not requester:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    target_id = _get_target_user_id(requester, user_id)
+    
     try:
-        agent = await _get_learning_agent_from_db()
+        agent = await _get_learning_agent_from_db(target_id)
         if not agent.trades:
             return {"calibration": []}
 
@@ -395,31 +438,22 @@ async def get_confidence_calibration() -> Dict[str, Any]:
 @router.post("/learning/auto-adapt/apply")
 async def apply_auto_adapt(
     learning_report_id: Optional[str] = None,
-    background_tasks: BackgroundTasks = None
+    background_tasks: BackgroundTasks = None,
+    user_id: str | None = None,
+    credentials: Any = Depends(security)
 ) -> Dict[str, Any]:
     """
     Apply suggested auto-adapt changes
-    
-    CONSTRAINTS: Only these 3 variables can change:
-    - size_multiplier (max ±20%)
-    - confidence_scaling (max ±20%)
-    - cooldown_after_loss (minutes)
-    
-    Cannot change:
-    - max_leverage
-    - stop_loss_logic
-    - symbols
-    - entry_conditions
-    
-    Args:
-        learning_report_id: Which report's suggestions to apply
-        
-    Returns:
-        Confirmation with changes and audit trail
     """
+    requester = await jwt_handler.verify_token(credentials.credentials)
+    if not requester:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    target_id = _get_target_user_id(requester, user_id)
+    
     try:
-        # Get latest report or specified report
-        report = learning_agent.analyze()
+        agent = await _get_learning_agent_from_db(target_id)
+        report = agent.analyze()
 
         if not report.suggested_adaptations.enabled:
             return {
@@ -529,13 +563,18 @@ async def get_adapt_history(
 
 
 @router.get("/learning/auto-adapt/current")
-async def get_current_adaptations() -> Dict[str, Any]:
+async def get_current_adaptations(
+    user_id: str | None = None,
+    credentials: Any = Depends(security)
+) -> Dict[str, Any]:
     """
     Get currently applied adaptations
-    
-    Returns:
-        Current values of the 3 allowed variables
     """
+    requester = await jwt_handler.verify_token(credentials.credentials)
+    if not requester:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    target_id = _get_target_user_id(requester, user_id)
     # Would load from database/config in production
     return {
         "size_multiplier": 1.0,
@@ -545,21 +584,39 @@ async def get_current_adaptations() -> Dict[str, Any]:
     }
 
 
-async def _fetch_historical_trades_from_binance(db_session: AsyncSession, limit: int = 50) -> int:
+async def _fetch_historical_trades_from_binance(db_session: AsyncSession, user_id: str, limit: int = 50) -> int:
     """
-    Sync recent Binance fills into the permanent Trade Journal.
-    Returns the number of new entries added.
+    Sync recent Binance fills into the permanent Trade Journal for a specific user.
     """
-    if not (settings.binance_api_key and settings.binance_api_secret):
-        logger.warning("Binance keys missing, skipping history sync")
+    # Get user's Binance credentials
+    from packages.shared.models import UserCredential
+    from packages.shared.encryption import decrypt_key
+    
+    cred_res = await db_session.execute(
+        select(UserCredential).where(UserCredential.user_id == user_id)
+    )
+    user_cred = cred_res.scalar_one_or_none()
+    
+    binance_key = None
+    binance_secret = None
+    use_testnet = True
+    
+    if user_cred and user_cred.binance_api_key:
+        binance_key = decrypt_key(user_cred.binance_api_key)
+        binance_secret = decrypt_key(user_cred.binance_api_secret)
+        use_testnet = user_cred.use_testnet
+    # Note: No admin fallback here for historical sync to avoid cross-user data leakage
+    
+    if not binance_key or not binance_secret:
+        logger.warning(f"Binance keys missing for user {user_id}, skipping history sync")
         return 0
         
     try:
         # Get active symbols from BotConfig or fallback
-        symbols = ["BTCUSDT", "ETHUSDT", "LINKUSDT", "XRPUSDT", "SOLUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "UNIUSDT", "DOGEUSDT"]
+        symbols = ["BTCUSDT", "ETHUSDT", "LINKUSDT", "SOLUSDT"]
         try:
             from packages.shared.models import BotConfig
-            bot_res = await db_session.execute(select(BotConfig).where(BotConfig.is_active == True))
+            bot_res = await db_session.execute(select(BotConfig).where(BotConfig.is_active == True, BotConfig.user_id == user_id))
             bot_config = bot_res.scalar_one_or_none()
             if bot_config and bot_config.symbols_json:
                 if isinstance(bot_config.symbols_json, list):
@@ -569,7 +626,7 @@ async def _fetch_historical_trades_from_binance(db_session: AsyncSession, limit:
         except Exception:
             pass
 
-        client = BinanceFuturesClient()
+        client = BinanceFuturesClient(api_key=binance_key, api_secret=binance_secret, testnet=use_testnet)
         connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
         async with aiohttp.ClientSession(connector=connector) as session:
             client.session = session
@@ -616,6 +673,7 @@ async def _fetch_historical_trades_from_binance(db_session: AsyncSession, limit:
                             exit_reason=ExitReason.MANUAL.value,
                             closed_at=dt,
                             decision_json={},
+                            user_id=user_id,
                             features_json={
                                 "entry_time": (dt - timedelta(minutes=5)).isoformat(),
                                 "exit_time": dt.isoformat(),
@@ -645,37 +703,45 @@ async def _fetch_historical_trades_from_binance(db_session: AsyncSession, limit:
 
 @router.get("/learning/dashboard-metrics")
 async def get_dashboard_learning_metrics(
-    db: AsyncSession = Depends(get_db)
+    user_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    credentials: Any = Depends(security)
 ) -> Dict[str, Any]:
     """
     Get learning metrics for dashboard display
-    
-    Returns:
-        Current stats, patterns, recommendations
     """
+    requester = await jwt_handler.verify_token(credentials.credentials)
+    if not requester:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    target_id = _get_target_user_id(requester, user_id)
+
     try:
         from packages.shared.market_intelligence import intelligence_aggregator
         from packages.shared.models import Decision
         
-        # 1. Fetch latest market snapshots from recent decisions
+        # 1. Fetch latest market snapshots from recent decisions for this user
         snapshots_result = await db.execute(
-            select(Decision.market_snapshot).where(Decision.market_snapshot != None).order_by(desc(Decision.timestamp)).limit(5)
+            select(Decision.market_snapshot)
+            .where(Decision.market_snapshot != None, Decision.user_id == target_id)
+            .order_by(desc(Decision.timestamp))
+            .limit(5)
         )
         recent_snapshots = snapshots_result.scalars().all()
         
         # 2. Market Context via Aggregator
         market_intel = await intelligence_aggregator.get_market_context(recent_snapshots)
         
-        agent = await _get_learning_agent_from_db()
+        agent = await _get_learning_agent_from_db(target_id)
         
         # 3. Fallback to Binance history if local DB is empty
         if not agent.trades or len(agent.trades) < 5:
-            logger.info("Insufficient trades in DB, syncing from Binance for analysis...")
+            logger.info(f"Insufficient trades in DB for user {target_id}, syncing from Binance for analysis...")
             async with AsyncSessionFactory() as db_session:
-                new_trades = await _fetch_historical_trades_from_binance(db_session, limit=100)
+                new_trades = await _fetch_historical_trades_from_binance(db_session, target_id, limit=100)
                 if new_trades > 0:
                     # Reload agent to include new trades
-                    agent = await _get_learning_agent_from_db()
+                    agent = await _get_learning_agent_from_db(target_id)
                 
         if not agent.trades or len(agent.trades) < 5:
             return {
@@ -720,13 +786,21 @@ async def get_dashboard_learning_metrics(
 
 
 @router.get("/learning/analytics-detail")
-async def get_detailed_analytics() -> Dict[str, Any]:
+async def get_detailed_analytics(
+    user_id: str | None = None,
+    credentials: Any = Depends(security)
+) -> Dict[str, Any]:
     """
     Get detailed trading analytics for AI training
-    Returns comprehensive metrics for learning and optimization
     """
+    requester = await jwt_handler.verify_token(credentials.credentials)
+    if not requester:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    target_id = _get_target_user_id(requester, user_id)
+    
     try:
-        agent = await _get_learning_agent_from_db()
+        agent = await _get_learning_agent_from_db(target_id)
         if not agent.trades or len(agent.trades) < 5:
             return {
                 "status": "insufficient_data",
@@ -800,10 +874,19 @@ async def get_detailed_analytics() -> Dict[str, Any]:
 
 
 @router.get("/learning/symbols-performance")
-async def get_symbols_performance() -> Dict[str, Any]:
+async def get_symbols_performance(
+    user_id: str | None = None,
+    credentials: Any = Depends(security)
+) -> Dict[str, Any]:
     """Get performance breakdown by trading symbol"""
+    requester = await jwt_handler.verify_token(credentials.credentials)
+    if not requester:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    target_id = _get_target_user_id(requester, user_id)
+    
     try:
-        agent = await _get_learning_agent_from_db()
+        agent = await _get_learning_agent_from_db(target_id)
         if not agent.trades:
             return {"symbols": {}}
 
@@ -847,10 +930,19 @@ async def get_symbols_performance() -> Dict[str, Any]:
 
 
 @router.get("/learning/training-insights")
-async def get_training_insights() -> Dict[str, Any]:
+async def get_training_insights(
+    user_id: str | None = None,
+    credentials: Any = Depends(security)
+) -> Dict[str, Any]:
     """Get AI training insights and recommendations"""
+    requester = await jwt_handler.verify_token(credentials.credentials)
+    if not requester:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    target_id = _get_target_user_id(requester, user_id)
+    
     try:
-        agent = await _get_learning_agent_from_db()
+        agent = await _get_learning_agent_from_db(target_id)
         if not agent.trades or len(agent.trades) < 5:
             return {
                 "status": "insufficient_data",
@@ -941,12 +1033,13 @@ async def get_training_insights() -> Dict[str, Any]:
 # Helper Functions
 # ============================================================================
 
-async def _trigger_learning_analysis():
+async def _trigger_learning_analysis(user_id: str):
     """Background task to run learning analysis"""
     try:
-        logger.info("🔄 Triggered learning analysis (50 trades milestone)")
+        logger.info(f"🔄 Triggered learning analysis for user {user_id}")
 
-        report = learning_agent.analyze()
+        agent = await _get_learning_agent_from_db(user_id)
+        report = agent.analyze()
 
         if report.suggested_adaptations.enabled:
             logger.info("📊 Suggested adaptations discovered")

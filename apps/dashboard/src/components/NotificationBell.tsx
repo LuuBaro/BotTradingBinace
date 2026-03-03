@@ -152,7 +152,7 @@ export const NotificationBell: React.FC = () => {
                                                         <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Tin tức thị trường (Real-time News)</span>
                                                     </div>
                                                     <button
-                                                        onClick={() => { toggle(); window.location.hash = '#/settings'; }}
+                                                        onClick={() => { toggle(); window.location.href = '/settings#news-sources'; }}
                                                         className="text-[8px] font-black text-blue-500/60 hover:text-blue-400 uppercase tracking-tighter transition-colors"
                                                     >
                                                         Cài đặt nguồn tin (Sources)

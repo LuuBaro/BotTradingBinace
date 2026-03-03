@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { LogOut, Menu, X, Zap, Brain, Activity, Shield, Settings, Grid, History, HeartPulse, Terminal, BookOpen, User } from 'lucide-react'
+import { LogOut, Menu, X, Zap, Brain, Activity, Shield, Grid, History, HeartPulse, Terminal, BookOpen, User, Key, Globe } from 'lucide-react'
 import { useAuthStore } from '../store'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { NotificationBell } from './NotificationBell'
@@ -14,6 +14,9 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
   // Initialize WebSocket connection
   useWebSocket()
 
+  const params = new URLSearchParams(location.search)
+  const monitorUserId = params.get('user_id')
+
   const menuItems = [
     { path: '/', label: 'Overview', icon: <Grid size={20} /> },
     { path: '/intel', label: 'Neural Watch', icon: <Brain size={20} /> },
@@ -25,8 +28,23 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
     { path: '/system-health', label: 'Health Nexus', icon: <HeartPulse size={20} /> },
     { path: '/events', label: 'Audit Trail', icon: <Terminal size={20} /> },
     { path: '/learning', label: 'Neural Opt', icon: <BookOpen size={20} /> },
-    { path: '/settings', label: 'System Prefs', icon: <Settings size={20} /> },
+    { path: '/terminal', label: 'Neural Console', icon: <Terminal size={20} /> },
+    { path: '/portal', label: 'API Keys & AI Model', icon: <Key size={20} /> },
   ]
+
+  // Add Admin-only items
+  if (user?.role?.toLowerCase() === 'admin') {
+    menuItems.push({
+      path: '/settings',
+      label: 'Global Intel',
+      icon: <Globe size={20} className="text-blue-400" />
+    })
+    menuItems.push({
+      path: '/admin',
+      label: 'Parent Node',
+      icon: <Grid size={20} className="text-yellow-400" />
+    })
+  }
 
   return (
     <div className="flex h-screen bg-[#020617] text-slate-200 overflow-hidden font-sans selection:bg-blue-500/30">
@@ -52,10 +70,11 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
         <nav className="flex-1 px-4 py-8 space-y-2 overflow-y-auto custom-scrollbar">
           {menuItems.map((item) => {
             const isActive = location.pathname === item.path
+            const targetPath = monitorUserId ? `${item.path}${item.path.includes('?') ? '&' : '?'}user_id=${monitorUserId}` : item.path
             return (
               <Link
                 key={item.path}
-                to={item.path}
+                to={targetPath}
                 className={`flex items-center gap-4 px-4 py-3.5 rounded-2xl transition-all duration-300 group relative ${isActive
                   ? 'bg-blue-600 text-white shadow-2xl shadow-blue-500/20'
                   : 'text-slate-500 hover:text-white hover:bg-white/5 '
@@ -117,6 +136,21 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
                 <span className="text-[10px] font-black uppercase tracking-widest">Live Execution Stack</span>
               </div>
             </div>
+            {monitorUserId && (
+              <div className="flex items-center gap-3 px-4 py-2 bg-amber-500/10 border border-amber-500/20 rounded-xl animate-pulse">
+                <Shield size={14} className="text-amber-400" />
+                <span className="text-[10px] font-black text-amber-400 uppercase tracking-widest leading-none">
+                  Neural Link: Monitoring Active [ID: {monitorUserId.slice(0, 8)}...]
+                </span>
+                <button
+                  onClick={() => window.location.href = location.pathname}
+                  className="ml-2 p-1 hover:bg-white/10 rounded-md text-amber-500"
+                  title="Dừng quan sát"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-6">

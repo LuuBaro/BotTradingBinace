@@ -3,6 +3,14 @@ Write-Host "Stopping all Python processes..."
 Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
 Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
 
+Write-Host "Cleaning caches..."
+# Remove Python caches
+Get-ChildItem -Path . -Filter "__pycache__" -Recurse -Directory | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+# Remove Vite cache
+if (Test-Path "apps\dashboard\node_modules\.vite") {
+    Remove-Item -Path "apps\dashboard\node_modules\.vite" -Force -Recurse -ErrorAction SilentlyContinue
+}
+
 Write-Host "Waiting for ports to clear..."
 Start-Sleep -Seconds 3
 

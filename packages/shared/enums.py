@@ -19,6 +19,7 @@ class ActionType(str, Enum):
     OPEN = "open"
     CLOSE = "close"
     HOLD = "hold"
+    NONE = "none"
 
 
 class Side(str, Enum):

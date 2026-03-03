@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { createApiClient, getApiBaseUrl } from '../api/client'
-import { Globe, Plus, Trash2, Radio, MessageSquare, ExternalLink, Settings2, KeyRound, Bot, Database, Save, CheckCircle2, FlaskConical, Network } from 'lucide-react'
+import { Globe, Plus, Trash2, Radio, MessageSquare, ExternalLink, Settings2, Bot, Database, Save, CheckCircle2, FlaskConical, Network, Shield, Brain, ShieldAlert } from 'lucide-react'
+import { useAuthStore } from '../store'
 
 interface SettingsResponse {
   settings: Record<string, any>
@@ -10,19 +12,52 @@ interface SettingsResponse {
   }
 }
 
+// Predefined model names for each provider
+const MODEL_OPTIONS: Record<string, string[]> = {
+  openai: [
+    'gpt-4o',
+    'gpt-4o-mini',
+    'gpt-4.1',
+    'gpt-4.1-mini',
+    'gpt-4.1-nano',
+    'gpt-4',
+    'gpt-4-turbo',
+    'gpt-3.5-turbo'
+  ],
+  anthropic: [
+    'claude-3.5-sonnet',
+    'claude-3.5-haiku',
+    'claude-3-opus-20240229',
+    'claude-3-sonnet-20240229',
+    'claude-3-haiku-20240307'
+  ],
+  gemini: [
+    'gemini-2.5-flash',
+    'gemini-2.5-pro',
+    'gemini-2.0-flash',
+    'gemini-2.0-flash-lite',
+    'gemini-flash-latest',
+    'gemini-pro-latest'
+  ],
+  groq: [
+    'llama3-70b-8192',
+    'llama3-8b-8192',
+    'mixtral-8x7b-32768',
+    'gemma-7b-it'
+  ]
+}
+
 export const SettingsPage: React.FC = () => {
+  const { user } = useAuthStore()
   const api = createApiClient(getApiBaseUrl(), localStorage.getItem('token') || '')
   const [loading, setLoading] = useState(true)
   const [settings, setSettings] = useState<Record<string, any>>({})
   const [dbStatus, setDbStatus] = useState<SettingsResponse['db_status'] | null>(null)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [restartRequired, setRestartRequired] = useState<string[]>([])
+  const [editFallbackSecrets, setEditFallbackSecrets] = useState(false)
 
-  const [binanceKey, setBinanceKey] = useState('')
-  const [binanceSecret, setBinanceSecret] = useState('')
-  const [telegramToken, setTelegramToken] = useState('')
-  const [openaiKey, setOpenaiKey] = useState('')
-  const [anthropicKey, setAnthropicKey] = useState('')
+  // Sensitive keys (Binance, OpenAI, etc.) are now managed per-user in Neural Portal
 
   // News Sources State
   const [newsSources, setNewsSources] = useState<any[]>([])
@@ -50,6 +85,23 @@ export const SettingsPage: React.FC = () => {
 
   useEffect(() => {
     loadSettings()
+
+    // Check for hash and scroll to element
+    if (window.location.hash === '#news-sources') {
+      setTimeout(() => {
+        const element = document.getElementById('news-sources');
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth' });
+          // Highlight effect
+          element.style.outline = '2px solid #3b82f6';
+          element.style.boxShadow = '0 0 40px rgba(59, 130, 246, 0.4)';
+          setTimeout(() => {
+            element.style.outline = '';
+            element.style.boxShadow = '';
+          }, 3000);
+        }
+      }, 500); // Wait for content load
+    }
   }, [])
 
   const handleSave = async () => {
@@ -60,47 +112,12 @@ export const SettingsPage: React.FC = () => {
         persist: 'both',
       }
 
-      if (binanceKey) payload.binance_api_key = binanceKey
-      if (binanceSecret) payload.binance_api_secret = binanceSecret
-      if (telegramToken) payload.telegram_bot_token = telegramToken
-      if (openaiKey) payload.openai_api_key = openaiKey
-      if (anthropicKey) payload.anthropic_api_key = anthropicKey
-
       const res = await api.updateSettings(payload)
       setSettings(res.settings)
       setRestartRequired(res.restart_required || [])
-      setMessage({ type: 'success', text: 'Cấu hình đã được cập nhật thành công (Settings Saved)' })
-      setBinanceKey('')
-      setBinanceSecret('')
-      setTelegramToken('')
-      setOpenaiKey('')
-      setAnthropicKey('')
+      setMessage({ type: 'success', text: 'Global intelligence configuration updated successfully.' })
     } catch (err: any) {
       setMessage({ type: 'error', text: `Save failed: ${err.message || err}` })
-    }
-  }
-
-  const handleTestBinance = async () => {
-    try {
-      const res = await api.testBinance()
-      setMessage({
-        type: res.ok ? 'success' : 'error',
-        text: res.ok ? `Binance Connected OK (${res.base_url})` : `Binance failed: ${res.error || res.status_code}`,
-      })
-    } catch (err: any) {
-      setMessage({ type: 'error', text: `Binance test failed: ${err.message || err}` })
-    }
-  }
-
-  const handleTestTelegram = async () => {
-    try {
-      const res = await api.testTelegram()
-      setMessage({
-        type: res.ok ? 'success' : 'error',
-        text: res.ok ? `Telegram OK (@${res.result?.username || 'bot'})` : `Telegram failed: ${res.error || 'unknown'}`,
-      })
-    } catch (err: any) {
-      setMessage({ type: 'error', text: `Telegram test failed: ${err.message || err}` })
     }
   }
 
@@ -146,17 +163,27 @@ export const SettingsPage: React.FC = () => {
     )
   }
 
+  if (user?.role?.toLowerCase() !== 'admin') {
+    return (
+      <div className="flex flex-col items-center justify-center h-[60vh] space-y-4">
+        <ShieldAlert size={64} className="text-rose-500 animate-pulse" />
+        <h2 className="text-2xl font-black text-white uppercase tracking-tighter">Truy cập bị từ chối</h2>
+        <p className="text-slate-500">Chỉ quản trị viên mới có quyền truy cập vào cài đặt hệ thống.</p>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-10 animate-fadeIn bg-mesh min-h-full pb-20 px-4 pt-4">
       {/* Header */}
       <div className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-6">
         <div className="space-y-2">
           <div className="flex items-center gap-2">
-            <Settings2 className="text-blue-400" size={14} />
-            <span className="text-[10px] uppercase font-black tracking-[0.3em] text-blue-400">Core Engine Configuration</span>
+            <Globe className="text-blue-400" size={14} />
+            <span className="text-[10px] uppercase font-black tracking-[0.3em] text-blue-400">Core Engine Resource Management</span>
           </div>
-          <h1 className="text-5xl font-black tracking-tighter text-white">System Settings</h1>
-          <p className="text-slate-400 font-medium">Global environment variables, API keys, and external data sources provisioning.</p>
+          <h1 className="text-5xl font-black tracking-tighter text-white">Global Intel</h1>
+          <p className="text-slate-400 font-medium">Quản trị hệ thống, luồng dữ liệu tin tức và hạ tầng quét dữ liệu chung.</p>
         </div>
         <div className="flex gap-3">
           <button onClick={handleSave} className="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-black uppercase tracking-widest text-xs flex items-center gap-2 transition-all shadow-lg shadow-blue-600/20">
@@ -187,184 +214,183 @@ export const SettingsPage: React.FC = () => {
           <div className="card glass-dark border-white/5 overflow-hidden group">
             <div className="card-header border-b border-white/5 bg-white/[0.02]">
               <h2 className="text-xl font-black flex items-center gap-3">
-                <KeyRound className="text-purple-400" size={20} />
-                API Gateways & Secrets
+                <Database className="text-purple-400" size={20} />
+                Execution Infrastructure
               </h2>
             </div>
             <div className="p-8 space-y-8">
 
+              {/* Information Alert */}
+              <div className="p-4 bg-blue-500/10 border border-blue-500/20 rounded-2xl flex items-center gap-3">
+                <Globe className="text-blue-400" size={20} />
+                <p className="text-sm text-blue-300 font-medium">
+                  <strong>Logic hệ thống:</strong> Trang này quản trị cấu hình <strong>global/fallback</strong> cho toàn hệ thống. Khóa API và AI <strong>cá nhân của admin</strong> (hoặc từng user) được quản lý tại <Link to="/portal" className="text-blue-400 underline font-bold italic">API Keys & AI Model</Link>.
+                </p>
+              </div>
+
+              <div className="p-4 bg-amber-500/10 border border-amber-500/20 rounded-2xl flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm text-amber-300 font-semibold">Fallback secrets (global) chỉ dùng khi user không có key riêng.</p>
+                  <p className="text-xs text-amber-200/80 mt-1">Mặc định bị khóa để tránh ghi đè nhầm cấu hình vận hành.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditFallbackSecrets((v) => !v)}
+                  className={`px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider border transition-all ${editFallbackSecrets
+                    ? 'bg-amber-500/20 text-amber-200 border-amber-400/40'
+                    : 'bg-white/5 text-slate-300 border-white/10 hover:bg-white/10'
+                    }`}
+                >
+                  {editFallbackSecrets ? 'Đang mở sửa fallback' : 'Mở sửa fallback'}
+                </button>
+              </div>
+
               {/* Environment */}
               <div className="space-y-4">
-                <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Environment Targeting</h3>
+                <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Global Targeting</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Execution Mode</label>
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">System Execution Mode</label>
                     <select
                       className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-purple-500/50 transition-colors"
                       value={settings.env || 'demo'}
                       onChange={(e) => setSettings({ ...settings, env: e.target.value })}
                     >
-                      <option value="demo">Demo / Paper Trading</option>
-                      <option value="live">Live / Real Money</option>
+                      <option value="demo">Global Demo (Testnet Default)</option>
+                      <option value="live">Global Live (Mainnet Authorized)</option>
                     </select>
                   </div>
-                  <div className="flex items-center gap-3 mt-7 bg-white/5 px-4 rounded-xl border border-white/5">
-                    <label className="flex items-center gap-3 cursor-pointer w-full py-3">
-                      <input
-                        type="checkbox"
-                        className="accent-purple-500 w-4 h-4"
-                        checked={!!settings.binance_testnet}
-                        onChange={(e) => setSettings({ ...settings, binance_testnet: e.target.checked })}
-                      />
-                      <span className="text-sm font-bold text-slate-300">Route to Binance Testnet</span>
-                    </label>
-                  </div>
                 </div>
               </div>
 
-              <div className="h-[1px] bg-white/5 w-full"></div>
-
-              {/* API Keys */}
-              <div className="space-y-4">
-                <div className="flex justify-between items-center">
-                  <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Binance Exchange Connection</h3>
-                  <button onClick={handleTestBinance} className="text-[10px] font-black uppercase tracking-widest text-purple-400 hover:text-purple-300 bg-purple-500/10 px-3 py-1 rounded-full transition-colors">Test Connection</button>
-                </div>
+              {/* BINANCE GLOBAL FALLBACK */}
+              <div className="space-y-4 pt-4 border-t border-white/5">
+                <h3 className="text-xs font-black text-yellow-500 uppercase tracking-widest flex items-center gap-2">
+                  <Shield size={14} />
+                  Binance Global Hub (Fallback mặc định)
+                </h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">API Key</label>
+                  <div className="space-y-1">
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest">Global API Key</label>
                     <input
                       type="password"
-                      placeholder="••••••••••••••••••••••••"
-                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-purple-500/50 transition-colors placeholder:text-slate-700"
-                      value={binanceKey}
-                      onChange={(e) => setBinanceKey(e.target.value)}
+                      disabled={!editFallbackSecrets}
+                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-yellow-500/50"
+                      value={settings.binance_api_key || ''}
+                      onChange={(e) => setSettings({ ...settings, binance_api_key: e.target.value })}
+                      autoComplete="off"
+                      placeholder={editFallbackSecrets ? 'Nhập fallback key nếu cần' : 'Đã khóa - bấm Mở sửa fallback để chỉnh'}
                     />
                   </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">API Secret</label>
+                  <div className="space-y-1">
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest">Global API Secret</label>
                     <input
                       type="password"
-                      placeholder="••••••••••••••••••••••••"
-                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-purple-500/50 transition-colors placeholder:text-slate-700"
-                      value={binanceSecret}
-                      onChange={(e) => setBinanceSecret(e.target.value)}
+                      disabled={!editFallbackSecrets}
+                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-yellow-500/50"
+                      value={settings.binance_api_secret || ''}
+                      onChange={(e) => setSettings({ ...settings, binance_api_secret: e.target.value })}
+                      autoComplete="off"
+                      placeholder={editFallbackSecrets ? 'Nhập fallback secret nếu cần' : 'Đã khóa - bấm Mở sửa fallback để chỉnh'}
                     />
                   </div>
                 </div>
               </div>
 
-              <div className="h-[1px] bg-white/5 w-full"></div>
-
-              {/* LLM Models */}
-              <div className="space-y-4">
-                <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Neural LLM Engines</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* AI GLOBAL FALLBACK */}
+              <div className="space-y-4 pt-4 border-t border-white/5">
+                <h3 className="text-xs font-black text-blue-500 uppercase tracking-widest flex items-center gap-2">
+                  <Brain size={14} />
+                  Neural Network Backbone (Fallback mặc định)
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Active Provider</label>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Provider</label>
                     <select
-                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-purple-500/50 transition-colors"
-                      value={settings.selected_llm || 'mock'}
+                      disabled={!editFallbackSecrets}
+                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-500/50"
+                      value={settings.selected_llm || 'openai'}
                       onChange={(e) => setSettings({ ...settings, selected_llm: e.target.value })}
                     >
-                      <option value="mock">Mock Engine (Testing)</option>
                       <option value="openai">OpenAI (GPT-4)</option>
                       <option value="anthropic">Anthropic (Claude)</option>
-                      <option value="groq">Groq (Ultra-fast)</option>
-                      <option value="local">Local Model (Ollama)</option>
+                      <option value="gemini">Google Gemini</option>
+                      <option value="groq">Groq (Fast Llama)</option>
+                      <option value="custom">Custom (Local/Ollama)</option>
                     </select>
                   </div>
-                  <div className="flex items-center gap-3 mt-7 bg-white/5 px-4 rounded-xl border border-white/5">
-                    <label className="flex items-center gap-3 cursor-pointer w-full py-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Neural Model</label>
+                    {settings.selected_llm === 'custom' ? (
                       <input
-                        type="checkbox"
-                        className="accent-purple-500 w-4 h-4"
-                        checked={!!settings.use_local_llm}
-                        onChange={(e) => setSettings({ ...settings, use_local_llm: e.target.checked })}
+                        type="text"
+                        disabled={!editFallbackSecrets}
+                        className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-500/50 font-mono"
+                        value={settings.custom_model || ''}
+                        onChange={(e) => setSettings({ ...settings, custom_model: e.target.value })}
+                        placeholder="e.g. llama3:70b"
                       />
-                      <span className="text-sm font-bold text-slate-300">Force Local Mode</span>
+                    ) : (
+                      <select
+                        disabled={!editFallbackSecrets}
+                        className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-500/50 font-mono"
+                        value={
+                          settings.selected_llm === 'openai' ? (settings.openai_model || 'gpt-4o-mini') :
+                          settings.selected_llm === 'anthropic' ? (settings.anthropic_model || 'claude-3.5-sonnet') :
+                          settings.selected_llm === 'gemini' ? (settings.gemini_model || 'gemini-2.0-flash') :
+                          settings.selected_llm === 'groq' ? (settings.groq_model || 'llama3-70b-8192') :
+                          ''
+                        }
+                        onChange={(e) => {
+                          const key = settings.selected_llm === 'openai' ? 'openai_model' :
+                            settings.selected_llm === 'anthropic' ? 'anthropic_model' :
+                            settings.selected_llm === 'gemini' ? 'gemini_model' :
+                            settings.selected_llm === 'groq' ? 'groq_model' :
+                            'custom_model';
+                          setSettings({ ...settings, [key]: e.target.value });
+                        }}
+                      >
+                        {MODEL_OPTIONS[settings.selected_llm || 'openai']?.map((model) => (
+                          <option key={model} value={model}>{model}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                  <div className="md:col-span-1">
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+                      {settings.selected_llm === 'openai' ? 'OpenAI API Key' :
+                        settings.selected_llm === 'anthropic' ? 'Anthropic API Key' :
+                        settings.selected_llm === 'gemini' ? 'Gemini API Key' :
+                        settings.selected_llm === 'groq' ? 'Groq API Key' :
+                        'Custom Endpoint'}
                     </label>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">OpenAI API Key</label>
                     <input
-                      type="password"
-                      placeholder="sk-..."
-                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-purple-500/50 transition-colors placeholder:text-slate-700"
-                      value={openaiKey}
-                      onChange={(e) => setOpenaiKey(e.target.value)}
-                    />
-                    <input
-                      type="text"
-                      placeholder="Model (e.g. gpt-4)"
-                      className="w-full mt-2 bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-purple-500/50 transition-colors"
-                      value={settings.openai_model || 'gpt-4o'}
-                      onChange={(e) => setSettings({ ...settings, openai_model: e.target.value })}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Anthropic API Key</label>
-                    <input
-                      type="password"
-                      placeholder="sk-ant-..."
-                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-purple-500/50 transition-colors placeholder:text-slate-700"
-                      value={anthropicKey}
-                      onChange={(e) => setAnthropicKey(e.target.value)}
-                    />
-                    <input
-                      type="text"
-                      placeholder="Model (e.g. claude-3)"
-                      className="w-full mt-2 bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-purple-500/50 transition-colors"
-                      value={settings.anthropic_model || 'claude-3-5-sonnet'}
-                      onChange={(e) => setSettings({ ...settings, anthropic_model: e.target.value })}
+                      type={settings.selected_llm === 'custom' ? 'text' : 'password'}
+                      disabled={!editFallbackSecrets}
+                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-500/50"
+                      value={
+                        settings.selected_llm === 'openai' ? (settings.openai_api_key || '') :
+                        settings.selected_llm === 'anthropic' ? (settings.anthropic_api_key || '') :
+                        settings.selected_llm === 'gemini' ? (settings.gemini_api_key || '') :
+                        settings.selected_llm === 'groq' ? (settings.groq_api_key || '') :
+                        (settings.custom_endpoint || '')
+                      }
+                      onChange={(e) => {
+                        const key = settings.selected_llm === 'openai' ? 'openai_api_key' :
+                          settings.selected_llm === 'anthropic' ? 'anthropic_api_key' :
+                          settings.selected_llm === 'gemini' ? 'gemini_api_key' :
+                          settings.selected_llm === 'groq' ? 'groq_api_key' :
+                          'custom_endpoint';
+                        setSettings({ ...settings, [key]: e.target.value });
+                      }}
+                      placeholder={settings.selected_llm === 'custom' ? 'http://localhost:11434' : ''}
+                      autoComplete="off"
                     />
                   </div>
                 </div>
-              </div>
-
-              <div className="h-[1px] bg-white/5 w-full"></div>
-
-              {/* Telegram Config */}
-              <div className="space-y-4">
-                <div className="flex justify-between items-center">
-                  <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Telegram Notification Bridge</h3>
-                  <button onClick={handleTestTelegram} className="text-[10px] font-black uppercase tracking-widest text-sky-400 hover:text-sky-300 bg-sky-500/10 px-3 py-1 rounded-full transition-colors">Test Bot</button>
-                </div>
-                <div className="grid grid-cols-1 gap-6">
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Telegram Bot Token (BotFather)</label>
-                    <input
-                      type="password"
-                      placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
-                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-sky-500/50 transition-colors placeholder:text-slate-700 text-center font-mono tracking-widest"
-                      value={telegramToken}
-                      onChange={(e) => setTelegramToken(e.target.value)}
-                    />
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Admin Chat IDs (Comma separated)</label>
-                    <input
-                      type="text"
-                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-sky-500/50 transition-colors"
-                      value={settings.telegram_admin_ids || ''}
-                      onChange={(e) => setSettings({ ...settings, telegram_admin_ids: e.target.value })}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Trader Chat IDs (Comma separated)</label>
-                    <input
-                      type="text"
-                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-sky-500/50 transition-colors"
-                      value={settings.telegram_trader_ids || ''}
-                      onChange={(e) => setSettings({ ...settings, telegram_trader_ids: e.target.value })}
-                    />
-                  </div>
-                </div>
+                <p className="text-[11px] text-slate-400">
+                  Gợi ý vận hành: dùng <code className="text-slate-200">/portal</code> cho key riêng của admin. Chỉ cấu hình fallback ở đây khi cần default cho user chưa cấu hình.
+                </p>
               </div>
             </div>
           </div>
@@ -400,8 +426,8 @@ export const SettingsPage: React.FC = () => {
         </div>
 
         {/* Intelligence Sources Side */}
-        <div className="lg:col-span-4 flex flex-col gap-8 h-full">
-          <div className="card glass-dark border-blue-500/10 bg-gradient-to-b from-slate-900 to-blue-950/20 overflow-hidden flex-1 flex flex-col">
+        <div className="lg:col-span-4 flex flex-col gap-8 h-full" id="news-sources">
+          <div className="card glass-dark border-blue-500/10 bg-gradient-to-b from-slate-900 to-blue-950/20 overflow-hidden flex-1 flex flex-col transition-all duration-700">
             <div className="p-6 border-b border-white/5 bg-white/[0.02] relative z-10">
               <h2 className="text-xl font-black flex items-center gap-3 text-white">
                 <Bot className="text-blue-400" size={20} />

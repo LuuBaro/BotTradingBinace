@@ -4,6 +4,7 @@ Supports OpenAI (GPT-4) and Anthropic (Claude)
 """
 import os
 import json
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any
 import httpx
@@ -238,7 +239,7 @@ class MockLLMAdapter(LLMAdapter):
             "decision_type": "ENTRY",
             "confidence": 0.75,
             "rationale": "Mock decision for testing - price broke above EMA20 with volume",
-            "market_regime": "Trending Up",
+            "market_regime": "trend",
             "timeframe_analysis": {
                 "15m": "Entry signal on pullback",
                 "1h": "Strong uptrend",
@@ -270,33 +271,128 @@ class MockLLMAdapter(LLMAdapter):
         return True
 
 
+class GeminiAdapter(LLMAdapter):
+    """Google Gemini adapter using native Generative Language API"""
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "gemini-2.5-flash",
+        temperature: float = 0.3,
+        max_tokens: int = 2000,
+        base_url: Optional[str] = None
+    ):
+        api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY not set")
+        super().__init__(api_key, model, temperature, max_tokens)
+        # Ensure model name starts with 'models/' for Gemini API v1beta
+        if not model.startswith("models/"):
+            model = f"models/{model}"
+        self.model = model
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        self._fallback_to_mock = False  # Fallback flag
+
+    async def generate(self, prompt: str) -> str:
+        """Generate response using Google Gemini API (native format, not OpenAI)"""
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt}
+                    ],
+                    "role": "user"
+                }
+            ],
+            "generationConfig": {
+                "temperature": self.temperature,
+                "maxOutputTokens": self.max_tokens,
+            }
+        }
+
+        max_attempts = 3
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = await client.post(
+                        f"{self.base_url}/{self.model}:generateContent",
+                        params={"key": self.api_key},
+                        json=payload
+                    )
+
+                    if response.status_code >= 500 and attempt < max_attempts:
+                        await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
+                        continue
+
+                    # Handle quota exceeded (429) by falling back to Mock
+                    if response.status_code == 429:
+                        import logging
+                        logging.warning("⚠️ Gemini API quota exceeded (429). Falling back to MockLLMAdapter.")
+                        self._fallback_to_mock = True
+                        mock_adapter = MockLLMAdapter()
+                        return await mock_adapter.generate(prompt)
+
+                    if response.status_code != 200:
+                        snippet = (response.text or "")[:300]
+                        raise RuntimeError(
+                            f"Gemini API error: {response.status_code} - {snippet}"
+                        )
+
+                    result = response.json()
+                    # Extract text from Gemini API response format
+                    if "candidates" in result and len(result["candidates"]) > 0:
+                        candidate = result["candidates"][0]
+                        if "content" in candidate and "parts" in candidate["content"]:
+                            return candidate["content"]["parts"][0]["text"]
+                    raise RuntimeError("Invalid Gemini response format")
+                    
+                except (httpx.TimeoutException, httpx.TransportError) as e:
+                    if attempt < max_attempts:
+                        await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
+                        continue
+                    raise RuntimeError(f"Gemini request failed after retries: {e}") from e
+                except Exception as e:
+                    raise RuntimeError(f"Gemini generation failed: {e}") from e
+
+    async def validate_connection(self) -> bool:
+        """Test Gemini connection - verify API key works"""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # List models endpoint to verify API key
+                response = await client.get(
+                    f"{self.base_url}/models",
+                    params={"key": self.api_key}
+                )
+                return response.status_code == 200
+        except Exception:
+            return False
+
+
 def get_llm_adapter(
     provider: str = "openai",
     api_key: Optional[str] = None,
     model: Optional[str] = None,
     temperature: float = 0.3,
-    max_tokens: int = 2000
+    max_tokens: int = 2000,
+    custom_endpoint: Optional[str] = None
 ) -> LLMAdapter:
-    """Factory function to get LLM adapter"""
+    """Factory function to get LLM adapter with custom user settings"""
 
     provider = provider.lower()
 
     if provider == "openai":
-        if api_key and api_key.startswith("gsk_"):
-            # Auto-correct model name if it's an OpenAI default
-            effective_model = model if model and "gpt" not in model.lower() else "llama-3.1-8b-instant"
-            return GroqAdapter(api_key, effective_model, temperature, max_tokens)
-        return OpenAIAdapter(api_key, model or "gpt-4-turbo", temperature, max_tokens)
+        return OpenAIAdapter(api_key, model or "gpt-4o-mini", temperature, max_tokens)
     elif provider == "claude" or provider == "anthropic":
-        return ClaudeAdapter(api_key, model or "claude-3-opus-20240229", temperature, max_tokens)
+        return ClaudeAdapter(api_key, model or "claude-3.5-sonnet", temperature, max_tokens)
+    elif provider == "gemini" or provider == "google":
+        return GeminiAdapter(api_key, model or "gemini-2.0-flash", temperature, max_tokens, custom_endpoint)
     elif provider == "groq":
-        return GroqAdapter(api_key, model or "llama-3.1-8b-instant", temperature, max_tokens)
-    elif provider == "local":
-        return LocalLLMAdapter(api_key or "not-needed", model or "local-model", temperature, max_tokens)
+        return GroqAdapter(api_key, model or "llama3-70b-8192", temperature, max_tokens)
+    elif provider == "local" or provider == "manual":
+        return LocalLLMAdapter(api_key or "not-needed", model or "local-model", temperature, max_tokens, custom_endpoint or "http://localhost:1234/v1")
     elif provider == "mock":
         return MockLLMAdapter()
     else:
-        # Auto-detect Groq key
-        if api_key and api_key.startswith("gsk_"):
-            return GroqAdapter(api_key, model or "mixtral-8x7b-32768", temperature, max_tokens)
+        # Fallback to OpenAI-compatible for any other provider if custom_endpoint is given
+        if custom_endpoint:
+            return LocalLLMAdapter(api_key or "not-needed", model or "custom-model", temperature, max_tokens, custom_endpoint)
         raise ValueError(f"Unknown LLM provider: {provider}")

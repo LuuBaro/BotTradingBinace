@@ -64,10 +64,14 @@ class Settings(BaseSettings):
 
     # LLM Providers (Phase 5+)
     selected_llm: str = Field(default="mock", description="Selected LLM provider")
-    openai_api_key: str | None = Field(default=None, description="OpenAI API key")
-    openai_model: str = Field(default="gpt-4", description="OpenAI model")
-    anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
-    anthropic_model: str = Field(default="claude-3-sonnet", description="Anthropic model")
+    bot_openai_api_key: str | None = Field(default=None, description="OpenAI API key")
+    openai_model: str = Field(default="gpt-4o-mini", description="OpenAI model")
+    bot_anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
+    anthropic_model: str = Field(default="claude-3.5-sonnet", description="Anthropic model")
+    bot_gemini_api_key: str | None = Field(default=None, description="Gemini API key")
+    gemini_model: str = Field(default="gemini-2.0-flash", description="Gemini model")
+    bot_groq_api_key: str | None = Field(default=None, description="Groq API key")
+    groq_model: str = Field(default="llama3-70b-8192", description="Groq model")
     use_local_llm: bool = Field(default=False, description="Use local LLM")
 
     # Telegram Bot (Phase 3+)
@@ -77,6 +81,12 @@ class Settings(BaseSettings):
     )
     telegram_trader_ids: str = Field(
         default="", description="Comma-separated Telegram trader chat IDs"
+    )
+
+    # Security / Database (Phase 1 SaaS)
+    master_encryption_key: str = Field(
+        default="cHOxn73dIyfP4J3z5kHezj7s8irAZE8HEeIGumkwl9M=", 
+        description="AES-256 key for sensitive credentials"
     )
 
     @property

@@ -1,5 +1,6 @@
-import React, { useEffect, useState, useMemo } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { useConfigStore, useAuthStore } from '../store'
+import { useLocation } from 'react-router-dom'
 import { createApiClient, getApiBaseUrl } from '../api/client'
 import { Save, RotateCcw, History, AlertTriangle, CheckCircle2, Cpu, Lock, Terminal, ShieldCheck, ChevronRight, Info } from 'lucide-react'
 import { format } from 'date-fns'
@@ -7,25 +8,31 @@ import { format } from 'date-fns'
 export const RiskConfigPage: React.FC = () => {
   const { currentConfig, setConfig, versions, setVersions } = useConfigStore()
   const { user } = useAuthStore()
+  const location = useLocation()
   const [editedConfig, setEditedConfig] = useState<any>(null)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
   const [loading, setLoading] = useState(true)
+  const [riskLogs, setRiskLogs] = useState<any[]>([])
 
   // Memoized API client
   const token = localStorage.getItem('token') || ''
-  const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token])
+  const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token, location.search])
 
   useEffect(() => {
     const fetchConfig = async () => {
       try {
         setLoading(true)
-        const config = await api.getRiskConfig()
-        const vers = await api.getRiskConfigVersions()
+        const [config, vers, logs] = await Promise.all([
+          api.getRiskConfig(),
+          api.getRiskConfigVersions(),
+          api.getRiskLogs(20)
+        ])
         console.log('📋 Loaded risk config:', config)
         console.log('📊 Loaded versions:', vers)
         setConfig(config)
         setVersions(vers)
+        setRiskLogs(logs || [])
         setEditedConfig({ ...config })
       } catch (error) {
         console.error('Failed to fetch config:', error)
@@ -203,7 +210,7 @@ export const RiskConfigPage: React.FC = () => {
                                 [key]: newVal,
                               })
                             }}
-                            className="w-full bg-slate-950/50 border border-white/5 py-3 px-5 rounded-2xl text-white font-bold font-mono focus:border-blue-500/50 focus:ring-4 focus:ring-blue-500/10 outline-none transition-all group-hover:bg-slate-900/50 text-sm [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                            className="w-full bg-slate-950/50 border border-white/5 py-3 px-5 rounded-2xl text-white font-bold font-mono outline-none transition-all text-sm [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none focus:border-blue-500/50 focus:ring-4 focus:ring-blue-500/10 group-hover:bg-slate-900/50 cursor-text"
                             step={typeof value === 'number' && Math.abs(value) < 1 ? '0.01' : '1'}
                           />
                           <div
@@ -215,38 +222,44 @@ export const RiskConfigPage: React.FC = () => {
                         </div>
                       </div>
                     )
-                  })
-                ) : (
-                  <div className="col-span-2 py-20 text-center opacity-30 select-none">
-                    <Terminal size={40} className="mx-auto mb-4" />
-                    <p className="text-xs font-black uppercase tracking-[0.3em]">No valid parameters detected</p>
-                  </div>
-                )}
-              </div>
+                })
+              ) : (
+                <div className="col-span-2 py-20 text-center opacity-30 select-none">
+                  <Terminal size={40} className="mx-auto mb-4" />
+                  <p className="text-xs font-black uppercase tracking-[0.3em]">No valid parameters detected</p>
+                </div>
+              )}
             </div>
-
-            <div className="p-10 pt-0">
-              <div className="flex gap-4 pt-10 border-t border-white/5">
-                <button
-                  onClick={handleSave}
-                  disabled={saving}
-                  className="btn btn-primary flex-[2] py-4 rounded-2xl shadow-xl shadow-blue-500/20 active:scale-[0.98] disabled:opacity-50 group overflow-hidden min-h-[56px] relative"
-                >
-                  <div className="relative z-10 flex items-center justify-center gap-3">
-                    {saving ? <div className="spinner w-4 h-4 border-2"></div> : <Save size={18} className="group-hover:scale-110 transition-transform" />}
-                    <span className="font-black uppercase tracking-widest text-xs">{saving ? 'Broadcasting...' : 'Apply Deployment Changes'}</span>
-                  </div>
-                  <div className="absolute inset-0 bg-gradient-to-r from-blue-600 to-purple-600 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"></div>
-                </button>
-                <button
-                  onClick={() => setEditedConfig({ ...currentConfig })}
-                  className="flex-1 py-4 glass-dark border-white/10 rounded-2xl text-slate-400 hover:text-white transition-all flex items-center justify-center gap-3 font-bold text-xs uppercase tracking-widest active:scale-95 min-h-[56px]"
-                >
-                  <RotateCcw size={18} />
-                  Reset
-                </button>
-              </div>
+          </div>
+            
+          <div className="p-10 pt-0">
+            <div className="flex gap-4 pt-10 border-t border-white/5">
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="btn btn-primary flex-[2] py-4 rounded-2xl shadow-xl shadow-blue-500/20 active:scale-[0.98] disabled:opacity-50 group overflow-hidden min-h-[56px] relative"
+              >
+                <div className="relative z-10 flex items-center justify-center gap-3">
+                  {saving ? (
+                    <div className="spinner w-4 h-4 border-2"></div>
+                  ) : (
+                    <Save size={18} className="group-hover:scale-110 transition-transform" />
+                  )}
+                  <span className="font-black uppercase tracking-widest text-xs">
+                    {saving ? 'Broadcasting...' : 'Apply Deployment Changes'}
+                  </span>
+                </div>
+                <div className="absolute inset-0 bg-gradient-to-r from-blue-600 to-purple-600 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"></div>
+              </button>
+              <button
+                onClick={() => setEditedConfig({ ...currentConfig })}
+                className="flex-1 py-4 glass-dark border-white/10 rounded-2xl text-slate-400 hover:text-white transition-all flex items-center justify-center gap-3 font-bold text-xs uppercase tracking-widest active:scale-95 min-h-[56px]"
+              >
+                <RotateCcw size={18} />
+                Reset
+              </button>
             </div>
+          </div>
 
             {/* Subtle background glow */}
             <div className="absolute bottom-0 right-0 w-[50%] h-[50%] bg-blue-500/[0.01] blur-[120px] pointer-events-none"></div>
@@ -320,6 +333,69 @@ export const RiskConfigPage: React.FC = () => {
             {/* Background Glow */}
             <div className="absolute top-0 right-0 w-32 h-32 bg-purple-500/5 blur-3xl opacity-50"></div>
           </div>
+        </div>
+      </div>
+
+      {/* Risk Rejection Logs - The actual "Vault" of intercepted risks */}
+      <div className="card glass-dark border border-white/5 rounded-[2.5rem] overflow-hidden shadow-2xl">
+        <div className="p-8 border-b border-white/5 bg-gradient-to-r from-rose-500/10 to-transparent flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="p-3 bg-rose-600 rounded-2xl shadow-lg shadow-rose-500/20">
+              <ShieldCheck size={20} className="text-white" />
+            </div>
+            <div>
+              <h3 className="text-xl font-black text-white tracking-tight uppercase italic">Risk Rejection Vault</h3>
+              <p className="text-[10px] font-bold text-rose-400 uppercase tracking-widest">Nhật ký các lệnh bị chặn bởi hệ thống quản trị rủi ro</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 px-4 py-2 bg-rose-500/10 rounded-xl border border-rose-500/20">
+            <div className="w-2 h-2 bg-rose-500 rounded-full animate-pulse"></div>
+            <span className="text-[10px] font-black text-rose-400 uppercase">Live Interception</span>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead>
+              <tr className="bg-white/[0.02]">
+                <th className="px-8 py-5 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Timestamp</th>
+                <th className="px-8 py-5 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Symbol</th>
+                <th className="px-8 py-5 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Reason / Violation</th>
+                <th className="px-8 py-5 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] text-right">Action taken</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              {riskLogs.map(log => (
+                <tr key={log.id} className="hover:bg-white/5 transition-colors group">
+                  <td className="px-8 py-6 text-xs font-mono text-slate-500">
+                    {format(new Date(log.timestamp), 'HH:mm:ss.SSS')}
+                    <span className="block text-[10px] text-slate-700 mt-1">{format(new Date(log.timestamp), 'MMM dd, yyyy')}</span>
+                  </td>
+                  <td className="px-8 py-6">
+                    <span className="text-lg font-black font-mono text-white italic tracking-tighter">{log.symbol}</span>
+                  </td>
+                  <td className="px-8 py-6">
+                    <div className="p-3 bg-rose-500/5 border border-rose-500/10 rounded-xl max-w-md">
+                      <p className="text-xs text-rose-100 font-medium leading-relaxed">{log.reason}</p>
+                    </div>
+                  </td>
+                  <td className="px-8 py-6 text-right">
+                    <span className="px-3 py-1 bg-slate-900 border border-slate-800 rounded-lg text-[10px] font-black text-slate-400 uppercase tracking-widest group-hover:border-rose-500/50 group-hover:text-rose-400 transition-all">TERMINATED</span>
+                  </td>
+                </tr>
+              ))}
+              {riskLogs.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="px-8 py-20 text-center">
+                    <div className="flex flex-col items-center gap-4 opacity-20">
+                      <ShieldCheck size={48} />
+                      <p className="text-xs font-black uppercase tracking-[0.3em]">No risk violations detected - System is clean</p>
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>

@@ -52,6 +52,12 @@ export interface Position {
   margin_type: string
   liquidation_price: number | null
   opened_at: string
+  binance_data?: any
+  source?: string
+  mark_price?: number
+  rationale?: string
+  confidence?: number
+  regime?: string
 }
 
 export interface Order {
@@ -65,6 +71,9 @@ export interface Order {
   order_type: string
   created_at: string
   updated_at: string
+  ai_regime?: string
+  ai_rationale?: string
+  trace_id?: string
 }
 
 export interface Decision {
