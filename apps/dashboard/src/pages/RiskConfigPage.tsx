@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react'
 import { useConfigStore, useAuthStore } from '../store'
 import { useLocation } from 'react-router-dom'
 import { createApiClient, getApiBaseUrl } from '../api/client'
-import { Save, RotateCcw, History, AlertTriangle, CheckCircle2, Cpu, Lock, Terminal, ShieldCheck, ChevronRight, Info } from 'lucide-react'
+import { Save, RotateCcw, History, AlertTriangle, CheckCircle2, Cpu, Lock, Terminal, ShieldCheck, ChevronRight, Info, X } from 'lucide-react'
 import { format } from 'date-fns'
 
 export const RiskConfigPage: React.FC = () => {
@@ -14,6 +14,28 @@ export const RiskConfigPage: React.FC = () => {
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
   const [loading, setLoading] = useState(true)
   const [riskLogs, setRiskLogs] = useState<any[]>([])
+  const [selectedVersion, setSelectedVersion] = useState<any | null>(null)
+
+  const formatVnDate = (iso: string) => {
+    const d = new Date(iso)
+    return new Intl.DateTimeFormat('vi-VN', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+    }).format(d)
+  }
+
+  const formatVnTime = (iso: string) => {
+    const d = new Date(iso)
+    return new Intl.DateTimeFormat('vi-VN', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(d)
+  }
 
   // Memoized API client
   const token = localStorage.getItem('token') || ''
@@ -56,18 +78,6 @@ export const RiskConfigPage: React.FC = () => {
       setMessage({ type: 'error', text: error.message || 'Verification failed during deployment' })
     } finally {
       setSaving(false)
-    }
-  }
-
-  const handleRollback = async (versionId: string) => {
-    try {
-      const config = await api.rollbackRiskConfig(versionId)
-      setConfig(config)
-      setEditedConfig(config)
-      setMessage({ type: 'success', text: 'Rollback sequence completed.' })
-      setTimeout(() => setMessage(null), 4000)
-    } catch (error: any) {
-      setMessage({ type: 'error', text: error.message || 'Rollback failed' })
     }
   }
 
@@ -304,14 +314,10 @@ export const RiskConfigPage: React.FC = () => {
                             <span className="w-1.5 h-1.5 rounded-full bg-blue-500 group-hover:animate-ping"></span>
                             <span className="text-[10px] font-black font-mono text-blue-400 uppercase tracking-tighter">REGISTRY_ID: {version.id.substring(0, 12)}</span>
                           </div>
-                          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{format(new Date(version.created_at), 'MMM dd, yyyy · HH:mm:ss')}</p>
+                          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                            {formatVnDate(version.created_at)} · {formatVnTime(version.created_at)} (GMT+7)
+                          </p>
                         </div>
-                        <button
-                          onClick={() => handleRollback(version.id)}
-                          className="bg-amber-500/10 border border-amber-500/20 text-amber-500 px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-amber-500 hover:text-black transition-all active:scale-95"
-                        >
-                          Restore State
-                        </button>
                       </div>
 
                       <div className="bg-slate-950/40 p-3 rounded-xl border border-white/5 italic">
@@ -320,10 +326,13 @@ export const RiskConfigPage: React.FC = () => {
 
                       <div className="mt-4 flex items-center justify-between text-[8px] font-black uppercase tracking-[0.2em] text-slate-600">
                         <span>Author: {version.created_by.toUpperCase() || 'SYSTEM_CORE'}</span>
-                        <div className="flex items-center gap-1 group-hover:text-blue-400 transition-colors">
+                        <button
+                          onClick={() => setSelectedVersion(version)}
+                          className="flex items-center gap-1 group-hover:text-blue-400 transition-colors"
+                        >
                           <span>Inspect JSON</span>
                           <ChevronRight size={10} />
-                        </div>
+                        </button>
                       </div>
                     </div>
                   ))
@@ -358,38 +367,37 @@ export const RiskConfigPage: React.FC = () => {
           <table className="w-full text-left">
             <thead>
               <tr className="bg-white/[0.02]">
-                <th className="px-8 py-5 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Timestamp</th>
-                <th className="px-8 py-5 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Symbol</th>
-                <th className="px-8 py-5 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">Reason / Violation</th>
-                <th className="px-8 py-5 text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] text-right">Action taken</th>
+                <th className="px-4 py-3 text-[10px] font-black text-slate-500 uppercase tracking-wider whitespace-nowrap">Timestamp</th>
+                <th className="px-4 py-3 text-[10px] font-black text-slate-500 uppercase tracking-wider whitespace-nowrap">Symbol</th>
+                <th className="px-4 py-3 text-[10px] font-black text-slate-500 uppercase tracking-wider">Reason / Violation</th>
+                <th className="px-4 py-3 text-[10px] font-black text-slate-500 uppercase tracking-wider text-right whitespace-nowrap">Action taken</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/5">
               {riskLogs.map(log => (
                 <tr key={log.id} className="hover:bg-white/5 transition-colors group">
-                  <td className="px-8 py-6 text-xs font-mono text-slate-500">
-                    {format(new Date(log.timestamp), 'HH:mm:ss.SSS')}
-                    <span className="block text-[10px] text-slate-700 mt-1">{format(new Date(log.timestamp), 'MMM dd, yyyy')}</span>
-                  </td>
-                  <td className="px-8 py-6">
-                    <span className="text-lg font-black font-mono text-white italic tracking-tighter">{log.symbol}</span>
-                  </td>
-                  <td className="px-8 py-6">
-                    <div className="p-3 bg-rose-500/5 border border-rose-500/10 rounded-xl max-w-md">
-                      <p className="text-xs text-rose-100 font-medium leading-relaxed">{log.reason}</p>
+                  <td className="px-4 py-3 text-xs font-mono text-slate-400 whitespace-nowrap max-w-[180px]">
+                    <div className="truncate">
+                      {formatVnDate(log.timestamp)} {formatVnTime(log.timestamp)}
                     </div>
                   </td>
-                  <td className="px-8 py-6 text-right">
-                    <span className="px-3 py-1 bg-slate-900 border border-slate-800 rounded-lg text-[10px] font-black text-slate-400 uppercase tracking-widest group-hover:border-rose-500/50 group-hover:text-rose-400 transition-all">TERMINATED</span>
+                  <td className="px-4 py-3 max-w-[120px]">
+                    <span className="text-sm font-black font-mono text-white italic tracking-tight truncate block">{log.symbol}</span>
+                  </td>
+                  <td className="px-4 py-3 max-w-[400px]">
+                    <p className="text-xs text-rose-200 truncate" title={log.reason}>{log.reason}</p>
+                  </td>
+                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                    <span className="px-2 py-1 bg-slate-900 border border-slate-800 rounded text-[10px] font-black text-slate-400 uppercase tracking-wide group-hover:border-rose-500/50 group-hover:text-rose-400 transition-all">TERMINATED</span>
                   </td>
                 </tr>
               ))}
               {riskLogs.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="px-8 py-20 text-center">
-                    <div className="flex flex-col items-center gap-4 opacity-20">
-                      <ShieldCheck size={48} />
-                      <p className="text-xs font-black uppercase tracking-[0.3em]">No risk violations detected - System is clean</p>
+                  <td colSpan={4} className="px-4 py-16 text-center">
+                    <div className="flex flex-col items-center gap-3 opacity-20">
+                      <ShieldCheck size={40} />
+                      <p className="text-xs font-black uppercase tracking-wider">No risk violations detected - System is clean</p>
                     </div>
                   </td>
                 </tr>
@@ -398,6 +406,30 @@ export const RiskConfigPage: React.FC = () => {
           </table>
         </div>
       </div>
+
+      {selectedVersion && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-3xl glass-dark border border-white/10 rounded-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
+              <div>
+                <p className="text-xs text-slate-400 font-mono">VERSION_ID: {selectedVersion.id}</p>
+                <h4 className="text-lg font-black text-white">Config JSON Snapshot</h4>
+              </div>
+              <button
+                onClick={() => setSelectedVersion(null)}
+                className="p-2 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="p-6 max-h-[70vh] overflow-auto">
+              <pre className="text-xs text-slate-200 bg-slate-950/70 border border-white/10 rounded-xl p-4 overflow-auto">
+{JSON.stringify(selectedVersion.config || {}, null, 2)}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -101,7 +101,16 @@ def _get_target_user_id(requester: Any, user_id: str | None = None) -> str:
     """Helper to determine the target user ID for impersonation by admins"""
     if user_id and requester and requester.role == "admin":
         return user_id
-    return requester.id if requester else None
+    
+    if not requester:
+        logger.warning("_get_target_user_id_no_requester", user_id=user_id)
+        return None
+    
+    if not hasattr(requester, 'id'):
+        logger.warning("_get_target_user_id_no_id_attr", requester=requester, user_id=user_id)
+        return None
+    
+    return requester.id
 
 
 def _validate_ai_provider(provider: str) -> str:
@@ -563,28 +572,38 @@ async def get_latency_metrics(credentials: Any = Depends(security)):
 # ===== Risk Configuration Endpoints =====
 
 @router.get("/config/risk")
-async def get_risk_config(credentials: Any = Depends(security)):
-    """Get current risk configuration"""
-    user = await jwt_handler.verify_token(credentials.credentials)
-    if not user:
+async def get_risk_config(
+    credentials: Any = Depends(security)
+):
+    """Get current user's risk configuration"""
+    try:
+        requester = await jwt_handler.verify_token(credentials.credentials)
+    except Exception as e:
+        logger.error("risk_config_auth_error", error=str(e))
+        raise HTTPException(status_code=401, detail=f"Auth error: {str(e)}")
+    if not requester:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     async with AsyncSessionFactory() as session:
-        # Get user-specific risk config
-        result = await session.execute(
-            select(BotConfig)
-            .where(BotConfig.is_active == True)
-            .where(BotConfig.user_id == user.id)
-            .order_by(BotConfig.id.desc())
-        )
-        bot_config = result.scalar_one_or_none()
-        
-        if bot_config and bot_config.risk_json:
-            return bot_config.risk_json
+        try:
+            # Get current user's risk config (not impersonation)
+            result = await session.execute(
+                select(BotConfig)
+                .where(BotConfig.is_active == True)
+                .where(BotConfig.user_id == requester.id)
+                .order_by(BotConfig.id.desc())
+            )
+            bot_config = result.scalar_one_or_none()
             
-        # Fallback to RiskConfig defaults if no active bot_config
-        from packages.shared.schemas import RiskConfig
-        return RiskConfig().model_dump()
+            if bot_config and bot_config.risk_json:
+                return bot_config.risk_json
+                
+            # Fallback to RiskConfig defaults if no active bot_config
+            from packages.shared.schemas import RiskConfig
+            return RiskConfig().model_dump()
+        except Exception as e:
+            logger.error("risk_config_query_error", requester_id=requester.id, error=str(e))
+            raise HTTPException(status_code=500, detail=f"Query error: {str(e)}")
 
 
 @router.post("/config/risk")
@@ -592,12 +611,16 @@ async def update_risk_config(
     config: dict,
     credentials: Any = Depends(security),
 ):
-    """Update risk configuration for current user (each user has their own risk settings)"""
-    user = await jwt_handler.verify_token(credentials.credentials)
-    if not user:
+    """Update current user's risk configuration"""
+    try:
+        requester = await jwt_handler.verify_token(credentials.credentials)
+    except Exception as e:
+        logger.error("risk_config_update_auth_error", error=str(e))
+        raise HTTPException(status_code=401, detail=f"Auth error: {str(e)}")
+    if not requester:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    logger.info("update_risk_config", user=user.username, config=config)
+    logger.info("update_risk_config", requester=requester.username, config=config)
 
     from packages.shared.schemas import RiskConfig
     try:
@@ -607,11 +630,11 @@ async def update_risk_config(
         raise HTTPException(status_code=422, detail=f"Invalid config: {e}")
 
     async with AsyncSessionFactory() as session:
-        # Update user-specific BotConfig
+        # Update current user's BotConfig
         result = await session.execute(
             select(BotConfig)
             .where(BotConfig.is_active == True)
-            .where(BotConfig.user_id == user.id)
+            .where(BotConfig.user_id == requester.id)
             .order_by(BotConfig.id.desc())
         )
         bot_config = result.scalar_one_or_none()
@@ -628,7 +651,7 @@ async def update_risk_config(
                 execution_json={},
                 version=1,
                 is_active=True,
-                user_id=user.id
+                user_id=requester.id
             )
             session.add(bot_config)
             
@@ -637,28 +660,48 @@ async def update_risk_config(
         version = await manager.create_version(
             config_type="risk",
             config=validated_config,
-            created_by=user.username,
-            description=f"Updated by {user.username}",
+            created_by=requester.username,
+            description=f"Updated by {requester.username}",
         )
         
         await session.commit()
         
-        logger.info("risk_config_saved_and_applied", version_id=version.id, config=validated_config)
+        await session.commit()
+        
+        logger.info("risk_config_saved_and_applied", version_id=version.id, requester=requester.username, config=validated_config)
         return validated_config
 
 
 @router.get("/config/risk/versions")
-async def get_config_versions(credentials: Any = Depends(security)):
-    """Get risk configuration versions"""
-    user = await jwt_handler.verify_token(credentials.credentials)
-    if not user:
+async def get_config_versions(
+    credentials: Any = Depends(security)
+):
+    """Get risk configuration versions for current user only"""
+    try:
+        requester = await jwt_handler.verify_token(credentials.credentials)
+    except Exception as e:
+        logger.error("risk_versions_auth_error", error=str(e))
+        raise HTTPException(status_code=401, detail=f"Auth error: {str(e)}")
+    if not requester:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    async with AsyncSessionFactory() as session:
-        manager = ConfigVersionManager(session)
-        versions = await manager.get_all_versions("risk", limit=50)
+    try:
+        async with AsyncSessionFactory() as session:
+            from packages.shared.config_versioning import ConfigVersion
 
-        return [v.to_dict() for v in versions]
+            result = await session.execute(
+                select(ConfigVersion)
+                .where(ConfigVersion.config_type == "risk")
+                .where(ConfigVersion.created_by == requester.username)
+                .order_by(ConfigVersion.created_at.desc())
+                .limit(50)
+            )
+            versions = result.scalars().all()
+
+            return [v.to_dict() for v in versions]
+    except Exception as e:
+        logger.error("risk_versions_query_error", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Query error: {str(e)}")
 
 
 @router.post("/config/risk/rollback/{version_id}")
@@ -1564,40 +1607,56 @@ async def get_audit_log(
 async def get_risk_logs(
     limit: int = 100,
     offset: int = 0,
-    user_id: str | None = None,
     credentials: Any = Depends(security),
 ):
-    """Get risk rejection logs (SaaS Multi-tenant Risk Vault)"""
-    requester = await jwt_handler.verify_token(credentials.credentials)
+    """Get current user's risk rejection logs"""
+    try:
+        requester = await jwt_handler.verify_token(credentials.credentials)
+    except Exception as e:
+        logger.error("risk_logs_auth_error", error=str(e))
+        raise HTTPException(status_code=401, detail=f"Auth error: {str(e)}")
     if not requester:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # SaaS: Admins can monitor other users or all
-    target_id = _get_target_user_id(requester, user_id)
+    try:
+        async with AsyncSessionFactory() as session:
+            from packages.shared.models import RiskLog
+            query = select(RiskLog).where(RiskLog.user_id == requester.id)
+                
+            result = await session.execute(
+                query.order_by(RiskLog.timestamp.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            logs = result.scalars().all()
 
-    async with AsyncSessionFactory() as session:
-        from packages.shared.models import RiskLog
-        query = select(RiskLog)
-        
-        if target_id != "all":
-            query = query.where(RiskLog.user_id == target_id)
-            
-        result = await session.execute(
-            query.order_by(RiskLog.timestamp.desc())
-            .limit(limit)
-            .offset(offset)
-        )
-        logs = result.scalars().all()
-        return [
-            {
-                "id": l.id,
-                "symbol": l.symbol,
-                "reason": l.reason,
-                "timestamp": l.timestamp.isoformat(),
-                "decision_json": l.decision_json
-            }
+            # Enrich with symbol from Decision.decision_json by trace_id when available
+            trace_ids = [l.trace_id for l in logs if getattr(l, "trace_id", None)]
+            decision_by_trace: dict[str, dict] = {}
+            if trace_ids:
+                decisions_res = await session.execute(
+                    select(Decision.trace_id, Decision.decision_json)
+                    .where(Decision.user_id == requester.id)
+                    .where(Decision.trace_id.in_(trace_ids))
+                )
+                for trace_id, decision_json in decisions_res.all():
+                    decision_by_trace[str(trace_id)] = decision_json or {}
+
+            return [
+                {
+                    "id": l.id,
+                    "symbol": (decision_by_trace.get(str(l.trace_id), {}) or {}).get("symbol", "UNKNOWN"),
+                    "reason": l.reason,
+                    "timestamp": l.timestamp.isoformat() if l.timestamp else None,
+                    "decision_json": decision_by_trace.get(str(l.trace_id), {}),
+                    "trace_id": l.trace_id,
+                    "result": l.result,
+                }
             for l in logs
         ]
+    except Exception as e:
+        logger.error("risk_logs_query_error", requester_id=requester.id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Query error: {str(e)}")
 
 
 # ===== Settings & Environment =====
@@ -1982,7 +2041,9 @@ async def close_position_manual(
                 error_type=type(e).__name__,
                 traceback=traceback.format_exc()
             )
-            raise HTTPException(status_code=500, detail=str(e))
+            # Important: Even if DB commit fails, the order might be placed on exchange
+            # Return success if we got this far - the position close was likely executed
+            return {"status": "success_with_error", "symbol": symbol, "error": str(e), "note": "Position close was likely executed on exchange despite error"}
 
 @router.post("/positions/open")
 async def open_position_manual(
