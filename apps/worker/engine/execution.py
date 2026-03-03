@@ -617,7 +617,17 @@ class ExecutionEngine:
         client_order_id = f"CLOSE_{trace_id[:8]}_{decision.symbol}"
 
         # Place market order to close (opposite side, reduce-only)
-        close_side = Side.SHORT if position.side == Side.LONG.value else Side.LONG
+        # position.side is stored as string (e.g., "LONG", "long", "SHORT", "short")
+        position_side_lower = position.side.lower() if position.side else "long"
+        close_side = Side.SHORT if position_side_lower == "long" else Side.LONG
+        
+        logger.info(
+            "closing_position",
+            symbol=decision.symbol,
+            position_side=position.side,
+            close_side=close_side.value,
+            quantity=position.qty
+        )
         
         if self.is_binance:
             close_order = await self.exchange.place_order(

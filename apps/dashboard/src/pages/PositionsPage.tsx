@@ -2,6 +2,8 @@ import React, { useEffect, useState, useMemo } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useDashboardStore } from '../store'
 import { createApiClient, getApiBaseUrl } from '../api/client'
+import { toast } from '../utils/toast'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import { formatDistanceToNow } from 'date-fns'
 import { Activity, TrendingUp, TrendingDown, Zap, Clock, X, Edit3, Share2, Anchor, RefreshCw, Brain, Grid, Layout } from 'lucide-react'
 
@@ -15,6 +17,7 @@ export const PositionsPage: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [formData, setFormData] = useState({ symbol: 'BTCUSDT', side: 'LONG', leverage: 10, size_pct: 1 })
   const [submitting, setSubmitting] = useState(false)
+  const [confirmClose, setConfirmClose] = useState<{ isOpen: boolean; symbol: string; position?: any }>({ isOpen: false, symbol: '' })
 
   // Memoized API client
   const token = localStorage.getItem('token') || ''
@@ -40,12 +43,12 @@ export const PositionsPage: React.FC = () => {
     setSubmitting(true)
     try {
       await api.openPosition(formData)
-      alert('Lệnh đã được gửi thành công!')
+      toast.success('Lệnh đã được gửi thành công!')
       setIsModalOpen(false)
       fetchData()
     } catch (error) {
       console.error('Lỗi khi đặt lệnh:', error)
-      alert('Không thể đặt lệnh. Vui lòng kiểm tra lại cấu hình.')
+      toast.error('Không thể đặt lệnh. Vui lòng kiểm tra lại cấu hình.')
     } finally {
       setSubmitting(false)
     }
@@ -56,6 +59,22 @@ export const PositionsPage: React.FC = () => {
     const interval = setInterval(fetchData, 5000)
     return () => clearInterval(interval)
   }, [api, setPositions, setOrders, refreshKey])
+
+  const handleClosePosition = async () => {
+    try {
+      await api.closePosition(confirmClose.symbol)
+      const pos = confirmClose.position
+      const pnl = pos?.unrealized_pnl || 0
+      const pnlText = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`
+      toast.success(`Đã đóng vị thế ${confirmClose.symbol} | P&L: ${pnlText}`)
+      fetchData()
+    } catch (error) {
+      console.error('Failed to close position:', error)
+      toast.error('Lỗi khi đóng vị thế!')
+    } finally {
+      setConfirmClose({ isOpen: false, symbol: '' })
+    }
+  }
 
   const totalPnL = positions.reduce((acc, p) => acc + (p.unrealized_pnl || 0), 0)
 
@@ -130,6 +149,23 @@ export const PositionsPage: React.FC = () => {
         </div>
       )}
 
+      {/* Confirm Close Position Dialog */}
+      <ConfirmDialog
+        isOpen={confirmClose.isOpen}
+        title="Đóng vị thế (Market Close)"
+        message={`Bạn có chắc muốn đóng vị thế ${confirmClose.symbol}? 
+        
+Khi đóng:
+• Vị thế sẽ bị thanh lý ngay tại giá thị trường hiện tại
+• Lợi nhuận/Lỗ (P&L) sẽ được cộng/trừ vào tài khoản
+• Không thể hoàn tác sau khi xác nhận`}
+        confirmText="Đóng ngay"
+        cancelText="Hủy"
+        type="danger"
+        onConfirm={handleClosePosition}
+        onCancel={() => setConfirmClose({ isOpen: false, symbol: '' })}
+      />
+
       {/* Header Section */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
         <div>
@@ -144,13 +180,6 @@ export const PositionsPage: React.FC = () => {
         </div>
 
         <div className="flex gap-4">
-          <button
-            onClick={() => setIsModalOpen(true)}
-            className="btn btn-primary self-center px-6 py-4 rounded-3xl flex items-center gap-3"
-          >
-            <Zap size={18} />
-            <span className="text-[10px] font-black uppercase tracking-widest">Mở vị thế</span>
-          </button>
           <div className="glass-dark px-6 py-4 rounded-3xl border border-white/5 shadow-2xl">
             <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Số lượng vị thế</span>
             <span className="text-2xl font-black text-white font-mono">{positions.length}</span>
@@ -298,18 +327,7 @@ export const PositionsPage: React.FC = () => {
                       <td className="px-6 py-6 text-right">
                         <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button
-                            onClick={async () => {
-                              if (confirm(`Xác nhận Đóng vị thế (Market Close) cho ${pos.symbol}?`)) {
-                                try {
-                                  await api.closePosition(pos.symbol)
-                                  alert(`Đã gửi yêu cầu đóng vị thế ${pos.symbol}`)
-                                  fetchData()
-                                } catch (e) {
-                                  console.error(e)
-                                  alert('Lỗi khi đóng vị thế!')
-                                }
-                              }
-                            }}
+                            onClick={() => setConfirmClose({ isOpen: true, symbol: pos.symbol, position: pos })}
                             className="px-4 py-2 bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white rounded-xl transition-all font-black text-[10px] uppercase tracking-widest border border-rose-500/20"
                           >
                             Close
@@ -529,18 +547,7 @@ export const PositionsPage: React.FC = () => {
                   </button>
                   <button
                     className="btn border-rose-500/20 bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white p-4 rounded-2xl group transition-all"
-                    onClick={async () => {
-                      if (confirm(`Xác nhận Đóng vị thế (Market Close) cho ${pos.symbol}?`)) {
-                        try {
-                          await api.closePosition(pos.symbol)
-                          alert(`Close request sent for ${pos.symbol}`)
-                          setRefreshKey(k => k + 1)
-                        } catch (error) {
-                          console.error('Failed to close position:', error)
-                          alert('Failed to close position')
-                        }
-                      }
-                    }}
+                    onClick={() => setConfirmClose({ isOpen: true, symbol: pos.symbol, position: pos })}
                   >
                     <X size={16} className="group-hover:rotate-90 transition-transform" />
                   </button>

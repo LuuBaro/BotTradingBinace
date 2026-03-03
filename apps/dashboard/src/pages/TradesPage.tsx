@@ -240,8 +240,9 @@ export const TradesPage: React.FC = () => {
                               try {
                                 await api.approveDecision(selectedTrace!)
                                 handleViewTrace(selectedTrace!) // Refresh details
+                                toast.success('Decision approved successfully!')
                               } catch (e) {
-                                alert('Failed to approve decision')
+                                toast.error('Failed to approve decision')
                               }
                             }}
                             className="btn btn-primary flex-1 shadow-2xl shadow-blue-500/20 border border-blue-400/30"

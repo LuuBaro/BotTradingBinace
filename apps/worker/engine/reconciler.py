@@ -4,7 +4,7 @@ Detects mismatches between position tracking and actual exchange positions
 """
 from datetime import datetime
 from typing import Dict, List, Any, Optional
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from packages.shared.models import (
     Position as PositionModel,
@@ -29,10 +29,120 @@ class ReconcilerEngine:
     def __init__(self, exchange):
         self.exchange = exchange
         self.is_binance = isinstance(exchange, BinanceFuturesClient)
+        self._positions_schema_checked = False
         logger.info(
             "reconciler_initialized",
             exchange_type="binance" if self.is_binance else "mock",
         )
+
+    async def _ensure_positions_constraints(self, session: AsyncSession) -> None:
+        """
+        Ensure positions table uses multi-tenant uniqueness:
+        UNIQUE(user_id, symbol) instead of legacy UNIQUE(symbol).
+        """
+        if self._positions_schema_checked:
+            return
+
+        idx_rows = (await session.execute(text("PRAGMA index_list('positions')"))).all()
+        has_target_uq = False
+        legacy_single_symbol_unique: Optional[str] = None
+
+        for row in idx_rows:
+            # PRAGMA index_list columns: seq, name, unique, origin, partial
+            idx_name = row[1]
+            is_unique = bool(row[2])
+            if not is_unique:
+                continue
+
+            cols_rows = (await session.execute(text(f"PRAGMA index_info('{idx_name}')"))).all()
+            cols = [c[2] for c in cols_rows]
+
+            if idx_name == "uq_positions_user_symbol" and cols == ["user_id", "symbol"]:
+                has_target_uq = True
+                continue
+
+            if cols == ["symbol"]:
+                legacy_single_symbol_unique = idx_name
+
+        if has_target_uq and not legacy_single_symbol_unique:
+            self._positions_schema_checked = True
+            return
+
+        logger.warning(
+            "positions_schema_legacy_detected",
+            legacy_unique_index=legacy_single_symbol_unique,
+            action="migrating_to_uq_user_symbol",
+        )
+
+        # Case 1: legacy unique index can be dropped directly
+        if legacy_single_symbol_unique and not legacy_single_symbol_unique.startswith("sqlite_autoindex"):
+            await session.execute(text(f"DROP INDEX IF EXISTS {legacy_single_symbol_unique}"))
+            await session.execute(text("CREATE INDEX IF NOT EXISTS ix_positions_symbol ON positions(symbol)"))
+            await session.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_positions_user_symbol "
+                    "ON positions(user_id, symbol)"
+                )
+            )
+            await session.commit()
+            logger.info("positions_schema_migrated", target="uq_positions_user_symbol")
+            self._positions_schema_checked = True
+            return
+
+        # Case 2: fallback for auto-generated UNIQUE(symbol) constraints
+        await session.execute(text("ALTER TABLE positions RENAME TO positions_old"))
+        await session.execute(
+            text(
+                """
+                CREATE TABLE positions (
+                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                    symbol VARCHAR(20) NOT NULL,
+                    side VARCHAR(10) NOT NULL,
+                    qty FLOAT NOT NULL,
+                    entry_price FLOAT NOT NULL,
+                    unrealized_pnl FLOAT NOT NULL,
+                    user_id VARCHAR(50) NOT NULL,
+                    sl_order_id VARCHAR(50),
+                    tp_order_id VARCHAR(50),
+                    stop_loss FLOAT,
+                    take_profit FLOAT,
+                    leverage INTEGER NOT NULL,
+                    margin_type VARCHAR(10) NOT NULL,
+                    liquidation_price FLOAT,
+                    opened_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO positions (
+                    id, symbol, side, qty, entry_price, unrealized_pnl,
+                    user_id, sl_order_id, tp_order_id, stop_loss, take_profit,
+                    leverage, margin_type, liquidation_price, opened_at, updated_at
+                )
+                SELECT
+                    id, symbol, side, qty, entry_price, unrealized_pnl,
+                    user_id, sl_order_id, tp_order_id, stop_loss, take_profit,
+                    leverage, margin_type, liquidation_price, opened_at, updated_at
+                FROM positions_old
+                """
+            )
+        )
+        await session.execute(text("DROP TABLE positions_old"))
+        await session.execute(text("CREATE INDEX IF NOT EXISTS ix_positions_symbol ON positions(symbol)"))
+        await session.execute(text("CREATE INDEX IF NOT EXISTS ix_positions_user_id ON positions(user_id)"))
+        await session.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_positions_user_symbol "
+                "ON positions(user_id, symbol)"
+            )
+        )
+        await session.commit()
+        logger.info("positions_schema_migrated", target="uq_positions_user_symbol")
+        self._positions_schema_checked = True
 
     async def reconcile(self, session: AsyncSession, user_id: str = "admin") -> Dict[str, Any]:
         """
@@ -328,6 +438,9 @@ class ReconcilerEngine:
             if not self.is_binance:
                 logger.debug("sync_positions_skipped_mock_exchange")
                 return
+
+            # Ensure DB constraints are compatible with multi-tenant positions.
+            await self._ensure_positions_constraints(session)
             
             # 1. Get exchange positions
             exchange_positions = await self._get_exchange_positions()

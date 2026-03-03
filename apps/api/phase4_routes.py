@@ -1907,6 +1907,8 @@ async def close_position_manual(
     credentials: Any = Depends(security)
 ):
     """Manually close a position"""
+    logger.info("close_position_start", symbol=symbol)
+    
     user = await jwt_handler.verify_token(credentials.credentials)
     if not user or user.role not in ("admin", "trader"):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -1919,8 +1921,11 @@ async def close_position_manual(
     
     async with AsyncSessionFactory() as session:
         try:
+            logger.info("close_position_session_created", user_id=user.id, symbol=symbol)
+            
             # Determine exchange
             if settings.binance_api_key and settings.binance_api_secret:
+                logger.info("close_position_using_binance", symbol=symbol)
                 async with BinanceFuturesClient() as exchange:
                     execution_engine = ExecutionEngine(exchange)
                     trace_id = f"manual_close_{uuid.uuid4().hex[:8]}"
@@ -1929,15 +1934,20 @@ async def close_position_manual(
                     decision = Decision(
                         symbol=symbol,
                         action=ActionType.CLOSE,
-                        regime=MarketRegime.UNKNOWN, # Fallback
-                        side=Side.LONG, # Side doesn't matter for close
+                        regime=MarketRegime.TREND,
+                        side=Side.LONG,
                         confidence=1.0,
-                        rationale=f"Manual close by {user.username}"
+                        rationale=f"Manual close by {user.username}",
+                        size_pct=0.01,  # Not used for CLOSE, just placeholder
+                        leverage=1,    # Not used for CLOSE, just placeholder
                     )
+                    logger.info("close_decision_created", trace_id=trace_id, symbol=symbol)
                     
-                    result = await execution_engine.execute_decision(decision, trace_id, session)
+                    result = await execution_engine.execute_decision(session, user.id, decision, trace_id)
+                    logger.info("close_position_success", trace_id=trace_id, symbol=symbol)
                     return result
             else:
+                logger.info("close_position_using_mock", symbol=symbol)
                 exchange = MockExchange()
                 execution_engine = ExecutionEngine(exchange)
                 trace_id = f"manual_close_{uuid.uuid4().hex[:8]}"
@@ -1946,16 +1956,28 @@ async def close_position_manual(
                 decision = Decision(
                     symbol=symbol,
                     action=ActionType.CLOSE,
-                    regime=MarketRegime.UNKNOWN, # Fallback
-                    side=Side.LONG, # Side doesn't matter for close
+                    regime=MarketRegime.TREND,
+                    side=Side.LONG,
                     confidence=1.0,
-                    rationale=f"Manual close by {user.username}"
+                    rationale=f"Manual close by {user.username}",
+                    size_pct=0.01,  # Not used for CLOSE, just placeholder
+                    leverage=1,    # Not used for CLOSE, just placeholder
                 )
+                logger.info("close_decision_created", trace_id=trace_id, symbol=symbol)
                 
-                result = await execution_engine.execute_decision(decision, trace_id, session)
+                result = await execution_engine.execute_decision(session, user.id, decision, trace_id)
+                logger.info("close_position_success", trace_id=trace_id, symbol=symbol)
                 return result
         except Exception as e:
-            logger.error("manual_close_failed", symbol=symbol, error=str(e))
+            import traceback
+            logger.error(
+                "manual_close_failed",
+                symbol=symbol,
+                user_id=str(user.id),
+                error=str(e),
+                error_type=type(e).__name__,
+                traceback=traceback.format_exc()
+            )
             raise HTTPException(status_code=500, detail=str(e))
 @router.post("/positions/open")
 async def open_position_manual(
@@ -2000,7 +2022,7 @@ async def open_position_manual(
                         rationale=f"Manual trade by {user.username}"
                     )
                     
-                    result = await execution_engine.execute_decision(decision, trace_id, session)
+                    result = await execution_engine.execute_decision(session, user.id, decision, trace_id)
                     return result
             else:
                 exchange = MockExchange()
@@ -2018,7 +2040,7 @@ async def open_position_manual(
                     rationale=f"Manual trade by {user.username}"
                 )
                 
-                result = await execution_engine.execute_decision(decision, trace_id, session)
+                result = await execution_engine.execute_decision(session, user.id, decision, trace_id)
                 return result
         except Exception as e:
             logger.error("manual_open_failed", symbol=symbol, error=str(e))

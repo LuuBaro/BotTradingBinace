@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
 import { useAuthStore } from './store'
 import { Layout } from './components/Layout'
+import { ToastContainer } from './components/ToastContainer'
 import { LoginPage } from './pages/LoginPage'
 import { OverviewPage } from './pages/OverviewPage'
 import { PositionsPage } from './pages/PositionsPage'
@@ -50,9 +51,11 @@ function App() {
   }
 
   return (
-    <Router>
-      <Layout>
-        <Routes>
+    <>
+      <ToastContainer />
+      <Router>
+        <Layout>
+          <Routes>
           <Route path="/" element={<OverviewPage />} />
           <Route path="/intel" element={<IntelPage />} />
           <Route path="/positions" element={<PositionsPage />} />
@@ -68,9 +71,10 @@ function App() {
           <Route path="/settings" element={<AdminRoute><SettingsPage /></AdminRoute>} />
           <Route path="/admin" element={<AdminRoute><AdminPanelPage /></AdminRoute>} />
           <Route path="*" element={<Navigate to="/" />} />
-        </Routes>
-      </Layout>
-    </Router>
+          </Routes>
+        </Layout>
+      </Router>
+    </>
   )
 }
 

@@ -103,19 +103,23 @@ class BinanceFuturesClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         signed: bool = False,
+        max_retries: int = 3,
     ) -> Dict[str, Any]:
         """
-        Make HTTP request to Binance API
+        Make HTTP request to Binance API with retry logic for rate limits (429)
         
         Args:
             method: HTTP method (GET, POST, DELETE)
             endpoint: API endpoint
             params: Query/body parameters
             signed: Whether request needs signature
+            max_retries: Max retries for rate limit (429) errors
         
         Returns:
             Response JSON
         """
+        import asyncio
+        
         if not self.session:
             raise RuntimeError("Session not initialized. Use async context manager.")
         
@@ -132,61 +136,78 @@ class BinanceFuturesClient:
         
         url = f"{self.base_url}{endpoint}"
         
-        try:
-            if method == "GET":
-                async with self.session.get(url, params=params, headers=headers) as response:
-                    if response.status >= 400:
-                        body = await response.text()
-                        logger.error("binance_error_response", status=response.status, body=body, endpoint=endpoint)
-                    response.raise_for_status()
-                    return await response.json()
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                if method == "GET":
+                    async with self.session.get(url, params=params, headers=headers) as response:
+                        if response.status >= 400:
+                            body = await response.text()
+                            logger.error("binance_error_response", status=response.status, body=body, endpoint=endpoint)
+                        response.raise_for_status()
+                        return await response.json()
+                
+                elif method == "POST":
+                    async with self.session.post(url, params=params, headers=headers) as response:
+                        if response.status >= 400:
+                            body = await response.text()
+                            logger.error("binance_error_response", status=response.status, body=body, endpoint=endpoint)
+                        response.raise_for_status()
+                        return await response.json()
+                
+                elif method == "DELETE":
+                    async with self.session.delete(url, params=params, headers=headers) as response:
+                        if response.status >= 400:
+                            body = await response.text()
+                            logger.error("binance_error_response", status=response.status, body=body, endpoint=endpoint)
+                        response.raise_for_status()
+                        return await response.json()
+                
+                else:
+                    raise ValueError(f"Unsupported HTTP method: {method}")
             
-            elif method == "POST":
-                async with self.session.post(url, params=params, headers=headers) as response:
-                    if response.status >= 400:
-                        body = await response.text()
-                        logger.error("binance_error_response", status=response.status, body=body, endpoint=endpoint)
-                    response.raise_for_status()
-                    return await response.json()
-            
-            elif method == "DELETE":
-                async with self.session.delete(url, params=params, headers=headers) as response:
-                    if response.status >= 400:
-                        body = await response.text()
-                        logger.error("binance_error_response", status=response.status, body=body, endpoint=endpoint)
-                    response.raise_for_status()
-                    return await response.json()
-            
-            else:
-                raise ValueError(f"Unsupported HTTP method: {method}")
+            except aiohttp.ClientResponseError as e:
+                # Retry on 429 (Too Many Requests)
+                if e.status == 429 and attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) + (attempt * 0.1)  # Exponential backoff with jitter
+                    logger.warning(
+                        "binance_rate_limit_retry",
+                        attempt=attempt + 1,
+                        max_retries=max_retries,
+                        wait_seconds=wait_time,
+                        endpoint=endpoint
+                    )
+                    await asyncio.sleep(wait_time)
+                    last_error = e
+                    continue
+                
+                # Handle other HTTP errors
+                if e.status == 400:
+                    try:
+                        pass
+                    except:
+                        pass
+                logger.error(
+                    "binance_api_error",
+                    method=method,
+                    endpoint=endpoint,
+                    status=e.status,
+                    message=e.message,
+                    url=str(e.request_info.url) if e.request_info else None
+                )
+                raise
+            except Exception as e:
+                logger.error(
+                    "binance_request_failed",
+                    method=method,
+                    endpoint=endpoint,
+                    error=str(e),
+                )
+                raise
         
-        except aiohttp.ClientResponseError as e:
-            # Handle 400 Bad Request with more detail if possible
-            if e.status == 400:
-                try:
-                    # In higher versions of aiohttp, we might not have access to the body here
-                    # unless we read it before raise_for_status. 
-                    # Let's try to capture it.
-                    pass
-                except:
-                    pass
-            logger.error(
-                "binance_api_error",
-                method=method,
-                endpoint=endpoint,
-                status=e.status,
-                message=e.message,
-                url=str(e.request_info.url) if e.request_info else None
-            )
-            raise
-        except Exception as e:
-            logger.error(
-                "binance_request_failed",
-                method=method,
-                endpoint=endpoint,
-                error=str(e),
-            )
-            raise
+        # All retries exhausted
+        if last_error:
+            raise last_error
 
     async def get_exchange_info(self) -> Dict[str, Any]:
         """Get exchange information including all symbols"""

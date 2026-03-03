@@ -341,8 +341,34 @@ class TradingWorker:
                     import json
                     pack_data = prompt_pack_model.content_json if isinstance(prompt_pack_model.content_json, dict) else json.loads(prompt_pack_model.content_json)
                     try:
-                        # Try to create PromptPackSchema from database content
-                        prompt_pack_schema = PromptPackSchema(**pack_data)
+                        # Check schema version: if it has system_prompt but no regimes, auto-convert from legacy format
+                        if isinstance(pack_data, dict) and "system_prompt" in pack_data and "regimes" not in pack_data:
+                            # Legacy PromptPack format - convert to new schema with defaults
+                            from packages.shared.prompt_pack import RegimeDefinition, EntryPlaybook, ExitPlaybook, Side, RiskParameters
+                            logger.warning(f"Converting legacy PromptPack from DB format")
+                            prompt_pack_schema = PromptPackSchema(
+                                name=pack_data.get("name", "legacy_converted"),
+                                version=pack_data.get("version", 1),
+                                active=pack_data.get("active", True),
+                                symbols=[symbol],
+                                regimes=[
+                                    RegimeDefinition(name="Trending Up", indicators={"rsi": ">50"}),
+                                    RegimeDefinition(name="Trending Down", indicators={"rsi": "<50"}),
+                                ],
+                                entry_playbooks=[
+                                    EntryPlaybook(side=Side.LONG, regime="Trending Up", conditions=["price > ema20"], target_ratio=2.0),
+                                    EntryPlaybook(side=Side.SHORT, regime="Trending Down", conditions=["price < ema20"], target_ratio=2.0),
+                                ],
+                                exit_playbooks=[
+                                    ExitPlaybook(side=Side.LONG, profit_target="2xR", stop_loss="entry - 1 ATR"),
+                                    ExitPlaybook(side=Side.SHORT, profit_target="2xR", stop_loss="entry + 1 ATR"),
+                                ],
+                                no_trade_conditions=[],
+                                risk_params=RiskParameters(),
+                            )
+                        else:
+                            # Try to create PromptPackSchema from database content
+                            prompt_pack_schema = PromptPackSchema(**pack_data)
                     except Exception as e:
                         logger.warning(f"Failed to load PromptPackSchema from DB: {e}. Will use default fallback.")
                 
@@ -373,12 +399,27 @@ class TradingWorker:
                     logger.info(f"Using default PromptPackSchema for symbol {symbol}")
                 
                 # Call AI orchestrator with real prompt pack + trader context
+                # If LLM provider is Gemini and hits 429, fall back to Mock
                 ai_result = await orchestrator.make_decision(
                     market_snapshot=snap_dict,
                     prompt_pack=prompt_pack_schema,
                     current_positions=ai_positions,
                     trader_context=trader_prompt  # Pass the trader's natural language prompt
                 )
+                
+                # Handle Gemini 429 quota error - fallback to Mock LLM
+                if not ai_result["valid"] and ai_result.get("errors"):
+                    error_msg = str(ai_result["errors"])
+                    if "429" in error_msg or "quota" in error_msg.lower():
+                        logger.warning(f"Gemini API quota hit - falling back to Mock LLM")
+                        mock_adapter = get_llm_adapter(provider="mock")
+                        mock_orchestrator = AIOrchestrator(mock_adapter)
+                        ai_result = await mock_orchestrator.make_decision(
+                            market_snapshot=snap_dict,
+                            prompt_pack=prompt_pack_schema,
+                            current_positions=ai_positions,
+                            trader_context=trader_prompt
+                        )
                 
                 # Convert result to Decision schema
                 if not ai_result["valid"] or not ai_result["decision"]:

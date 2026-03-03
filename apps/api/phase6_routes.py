@@ -697,6 +697,143 @@ async def _fetch_historical_trades_from_binance(db_session: AsyncSession, user_i
         return 0
 
 
+async def _backfill_trade_journal_from_orders(
+    db_session: AsyncSession,
+    user_id: str,
+    min_needed: int = 5,
+    max_orders: int = 300,
+) -> int:
+    """
+    Build TradeJournal entries from REAL filled orders (no mock data).
+    Pairs BUY/SELL orders by symbol in chronological order.
+    """
+    from packages.shared.models import Order
+
+    # Skip when already enough journal trades
+    current_res = await db_session.execute(
+        select(TradeJournalModel).where(TradeJournalModel.user_id == user_id)
+    )
+    current_trades = current_res.scalars().all()
+    if len(current_trades) >= min_needed:
+        return 0
+
+    existing_trace_ids = {t.trace_id for t in current_trades if t.trace_id}
+
+    orders_res = await db_session.execute(
+        select(Order)
+        .where(Order.user_id == user_id)
+        .where(Order.status.in_(["FILLED", "PARTIALLY_FILLED"]))
+        .order_by(Order.created_at.asc())
+        .limit(max_orders)
+    )
+    orders = orders_res.scalars().all()
+    if len(orders) < 2:
+        return 0
+
+    by_symbol: Dict[str, list] = {}
+    for o in orders:
+        by_symbol.setdefault(o.symbol, []).append(o)
+
+    created = 0
+    for symbol, items in by_symbol.items():
+        long_entries: list = []
+        short_entries: list = []
+
+        for o in items:
+            side = (o.side or "").upper()
+            if side == "BUY":
+                if short_entries:
+                    entry = short_entries.pop(0)  # short entry is SELL
+                    exit_order = o
+                    trade_side = "short"
+                else:
+                    long_entries.append(o)
+                    continue
+            elif side == "SELL":
+                if long_entries:
+                    entry = long_entries.pop(0)  # long entry is BUY
+                    exit_order = o
+                    trade_side = "long"
+                else:
+                    short_entries.append(o)
+                    continue
+            else:
+                continue
+
+            trace_id = f"ord_backfill_{entry.id}_{exit_order.id}_{trade_side}"
+            if trace_id in existing_trace_ids:
+                continue
+
+            entry_price = float(entry.avg_price or 0.0)
+            exit_price = float(exit_order.avg_price or 0.0)
+            if entry_price <= 0 or exit_price <= 0:
+                continue
+
+            entry_qty = float(entry.filled_qty or entry.quantity or 0.0)
+            exit_qty = float(exit_order.filled_qty or exit_order.quantity or 0.0)
+            qty = min(entry_qty, exit_qty)
+            if qty <= 0:
+                continue
+
+            if trade_side == "long":
+                pnl = (exit_price - entry_price) * qty
+                pnl_pct = (exit_price - entry_price) / entry_price
+            else:
+                pnl = (entry_price - exit_price) * qty
+                pnl_pct = (entry_price - exit_price) / entry_price
+
+            entry_time = entry.created_at or datetime.utcnow()
+            exit_time = exit_order.updated_at or exit_order.created_at or datetime.utcnow()
+            holding = max(0, int((exit_time - entry_time).total_seconds()))
+
+            journal_entry = TradeJournalModel(
+                trace_id=trace_id,
+                symbol=symbol,
+                side=trade_side,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                pnl=float(pnl),
+                rr=1.0,
+                holding_time=holding,
+                regime="order_backfill",
+                exit_reason=ExitReason.MANUAL.value,
+                closed_at=exit_time,
+                decision_json={
+                    "symbol": symbol,
+                    "action": "close",
+                    "side": trade_side,
+                    "confidence": 0.7,
+                    "rationale": f"Backfilled from real orders #{entry.id} -> #{exit_order.id}",
+                },
+                user_id=user_id,
+                features_json={
+                    "entry_time": entry_time.isoformat(),
+                    "exit_time": exit_time.isoformat(),
+                    "entry_quantity": qty,
+                    "entry_order_id": entry.id,
+                    "exit_order_id": exit_order.id,
+                    "entry_leverage": 1.0,
+                    "pnl_pct": float(pnl_pct),
+                    "ai_model": "order_backfill",
+                    "confidence": 0.7,
+                },
+            )
+            db_session.add(journal_entry)
+            existing_trace_ids.add(trace_id)
+            created += 1
+
+            if len(current_trades) + created >= min_needed:
+                break
+
+        if len(current_trades) + created >= min_needed:
+            break
+
+    if created > 0:
+        await db_session.commit()
+        logger.info(f"✅ Backfilled {created} TradeJournal rows from REAL Order data for user {user_id}")
+    return created
+
+
 # ============================================================================
 # Dashboard Metrics
 # ============================================================================
@@ -732,16 +869,22 @@ async def get_dashboard_learning_metrics(
         # 2. Market Context via Aggregator
         market_intel = await intelligence_aggregator.get_market_context(recent_snapshots)
         
+        # 3. ALWAYS backfill from local REAL orders first (before loading agent)
+        # This ensures TradeJournal is populated before agent tries to load it
+        backfilled = await _backfill_trade_journal_from_orders(db, target_id, min_needed=5)
+        if backfilled > 0:
+            logger.info(f"Backfilled {backfilled} trades from orders for user {target_id}")
+
+        # Load agent AFTER backfill is complete
         agent = await _get_learning_agent_from_db(target_id)
         
-        # 3. Fallback to Binance history if local DB is empty
+        # If still insufficient, fallback to Binance historical fills
         if not agent.trades or len(agent.trades) < 5:
-            logger.info(f"Insufficient trades in DB for user {target_id}, syncing from Binance for analysis...")
-            async with AsyncSessionFactory() as db_session:
-                new_trades = await _fetch_historical_trades_from_binance(db_session, target_id, limit=100)
-                if new_trades > 0:
-                    # Reload agent to include new trades
-                    agent = await _get_learning_agent_from_db(target_id)
+            logger.info(f"Still insufficient trades in DB for user {target_id}, fetching from Binance...")
+            new_trades = await _fetch_historical_trades_from_binance(db, target_id, limit=100)
+            if new_trades > 0:
+                # Reload agent to include new Binance trades
+                agent = await _get_learning_agent_from_db(target_id)
                 
         if not agent.trades or len(agent.trades) < 5:
             return {
@@ -1487,13 +1630,24 @@ async def get_pnl_30days_breakdown() -> Dict[str, Any]:
 
 @router.get("/learning/trader-context/history")
 async def get_trader_context_history(
-    limit: int = Query(10, ge=1, le=50)
+    limit: int = Query(10, ge=1, le=50),
+    user_id: str | None = None,
+    credentials: Any = Depends(security),
 ) -> Dict[str, Any]:
     """Get history of imported trader expertise"""
     try:
+        requester = await jwt_handler.verify_token(credentials.credentials)
+        if not requester:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        target_id = _get_target_user_id(requester, user_id)
+
         async with AsyncSessionFactory() as session:
             result = await session.execute(
-                select(TraderContext).order_by(desc(TraderContext.timestamp)).limit(limit)
+                select(TraderContext)
+                .where(TraderContext.user_id == target_id)
+                .order_by(desc(TraderContext.timestamp))
+                .limit(limit)
             )
             history = result.scalars().all()
             
@@ -1511,18 +1665,26 @@ async def get_trader_context_history(
             }
     except Exception as e:
         logger.error(f"❌ Failed to fetch trader context history: {str(e)}")
-        return {"success": false, "error": str(e)}
+        return {"success": False, "error": str(e)}
 
 
 @router.post("/learning/import-trader-context")
 async def import_trader_context(
-    payload: Dict[str, Any]
+    payload: Dict[str, Any],
+    user_id: str | None = None,
+    credentials: Any = Depends(security),
 ) -> Dict[str, Any]:
     """
     Import human trader expertise into the AI system.
     Saves context to database for use in AI Decision Agent prompts.
     """
     try:
+        requester = await jwt_handler.verify_token(credentials.credentials)
+        if not requester:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        target_id = _get_target_user_id(requester, user_id)
+
         prompt = payload.get("trader_prompt")
         trader_name = payload.get("trader_name", "Anonymous Trader")
         
@@ -1535,6 +1697,7 @@ async def import_trader_context(
         async with AsyncSessionFactory() as session:
             new_context = TraderContext(
                 trader_name=trader_name,
+                user_id=target_id,
                 prompt=prompt,
                 timestamp=datetime.utcnow()
             )
