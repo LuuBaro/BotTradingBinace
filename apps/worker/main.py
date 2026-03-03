@@ -106,7 +106,8 @@ class TradingWorker:
             llm_config = {
                 "provider": cred.ai_provider,
                 "api_key": decrypt_key(cred.ai_api_key),
-                "model": cred.ai_model
+                "model": cred.ai_model,
+                "custom_endpoint": cred.ai_custom_endpoint,
             }
         elif user.role == "admin":
             provider = (settings.selected_llm or "openai").lower()
@@ -133,7 +134,8 @@ class TradingWorker:
             llm_config = {
                 "provider": provider,
                 "api_key": api_key,
-                "model": model
+                "model": model,
+                "custom_endpoint": None,
             }
             
         return binance_keys, llm_config
@@ -208,7 +210,12 @@ class TradingWorker:
         exchange.session = self.binance_session
         await exchange.sync_server_time()
 
-        llm = get_llm_adapter(provider=llm_conf["provider"], api_key=llm_conf["api_key"], model=llm_conf["model"])
+        llm = get_llm_adapter(
+            provider=llm_conf["provider"],
+            api_key=llm_conf["api_key"],
+            model=llm_conf["model"],
+            custom_endpoint=llm_conf.get("custom_endpoint"),
+        )
         orchestrator = AIOrchestrator(llm)
 
         if not bot_config:
