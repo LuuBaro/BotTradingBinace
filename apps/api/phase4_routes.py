@@ -1048,27 +1048,56 @@ async def get_orders(
         try:
             async with AsyncSessionFactory() as session:
                 from packages.shared.models import Decision, Order, OrderIntent
-                db_orders_res = await session.execute(select(Order).where(Order.id.in_([int(o["id"]) for o in res_orders])))
-                db_orders = {o.id: o for o in db_orders_res.scalars().all()}
+
+                # Only resolve local DB ids if the response item id is numeric and user-scoped
+                local_ids = [
+                    int(o["id"])
+                    for o in res_orders
+                    if str(o.get("id", "")).isdigit()
+                ]
+                db_orders = {}
+                if local_ids:
+                    db_orders_res = await session.execute(
+                        select(Order)
+                        .where(Order.user_id == target_id)
+                        .where(Order.id.in_(local_ids))
+                    )
+                    db_orders = {o.id: o for o in db_orders_res.scalars().all()}
+
                 exchange_ids = [o.exchange_order_id for o in db_orders.values() if o.exchange_order_id]
                 client_ids = [o.client_order_id for o in db_orders.values() if o.client_order_id]
                 dec_by_eid = {}
                 if exchange_ids:
-                    d_res = await session.execute(select(Decision).where(Decision.order_id.in_(exchange_ids), Decision.user_id == target_id))
+                    d_res = await session.execute(
+                        select(Decision)
+                        .where(Decision.user_id == target_id)
+                        .where(Decision.order_id.in_(exchange_ids))
+                    )
                     dec_by_eid = {d.order_id: d for d in d_res.scalars().all() if d.order_id}
+
                 dec_by_tid = {}
                 intent_tid_map = {}
                 if client_ids:
-                    i_res = await session.execute(select(OrderIntent).where(OrderIntent.client_order_id.in_(client_ids)))
+                    i_res = await session.execute(
+                        select(OrderIntent).where(OrderIntent.client_order_id.in_(client_ids))
+                    )
                     intent_tid_map = {i.client_order_id: i.trace_id for i in i_res.scalars().all()}
                     t_ids = list(intent_tid_map.values())
                     if t_ids:
-                        d_res = await session.execute(select(Decision).where(Decision.trace_id.in_(t_ids), Decision.user_id == user.id))
+                        d_res = await session.execute(
+                            select(Decision)
+                            .where(Decision.user_id == target_id)
+                            .where(Decision.trace_id.in_(t_ids))
+                        )
                         dec_by_tid = {d.trace_id: d for d in d_res.scalars().all()}
+
                 for o_dict in res_orders:
-                    db_id = int(o_dict["id"])
-                    o_obj = db_orders.get(db_id)
-                    if not o_obj: continue
+                    o_id = str(o_dict.get("id", ""))
+                    if not o_id.isdigit():
+                        continue
+                    o_obj = db_orders.get(int(o_id))
+                    if not o_obj:
+                        continue
                     d = None
                     if o_obj.exchange_order_id and o_obj.exchange_order_id in dec_by_eid:
                         d = dec_by_eid[o_obj.exchange_order_id]
