@@ -249,6 +249,12 @@ class BinanceFuturesClient:
         result = await self._request("GET", "/fapi/v2/positionRisk", params=params, signed=True)
         return result
 
+    async def get_position_mode(self) -> str:
+        """Return account position mode: HEDGE or ONE_WAY"""
+        result = await self._request("GET", "/fapi/v1/positionSide/dual", signed=True)
+        # dualSidePosition=true => Hedge Mode
+        return "HEDGE" if bool(result.get("dualSidePosition")) else "ONE_WAY"
+
     async def get_income_history(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Fetch recent REALIZED_PNL events (which map directly to closed positions) across ALL symbols"""
         params = {"incomeType": "REALIZED_PNL", "limit": limit}
@@ -272,6 +278,7 @@ class BinanceFuturesClient:
         reduce_only: bool = False,
         time_in_force: str = "GTC",
         client_order_id: Optional[str] = None,
+        position_side: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Place a new order
@@ -306,7 +313,10 @@ class BinanceFuturesClient:
         
         if reduce_only:
             params["reduceOnly"] = "true"
-        
+
+        if position_side:
+            params["positionSide"] = position_side
+
         if client_order_id:
             params["newClientOrderId"] = client_order_id
         

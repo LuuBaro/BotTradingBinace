@@ -616,27 +616,41 @@ class ExecutionEngine:
         # Generate client_order_id for close order
         client_order_id = f"CLOSE_{trace_id[:8]}_{decision.symbol}"
 
-        # Place market order to close (opposite side, reduce-only)
-        # position.side is stored as string (e.g., "LONG", "long", "SHORT", "short")
+        # Place market order to close (opposite side)
+        # position.side may be LONG/SHORT or long/short
         position_side_lower = position.side.lower() if position.side else "long"
-        close_side = Side.SHORT if position_side_lower == "long" else Side.LONG
-        
+        close_side = Side.SHORT if position_side_lower == Side.LONG.value else Side.LONG
+
         logger.info(
             "closing_position",
             symbol=decision.symbol,
             position_side=position.side,
             close_side=close_side.value,
-            quantity=position.qty
+            quantity=position.qty,
         )
-        
+
         if self.is_binance:
+            qty = float(position.qty)
+            symbol_info = await self.exchange.get_symbol_info(decision.symbol)
+            if symbol_info:
+                qty = self.exchange.round_quantity(symbol_info, qty)
+
+            position_mode = await self.exchange.get_position_mode()
+            # In hedge mode, send explicit positionSide; reduceOnly is often rejected.
+            # In one-way mode, use reduceOnly for safer close semantics.
+            if str(position.side).lower() == Side.LONG.value:
+                binance_position_side = "LONG"
+            else:
+                binance_position_side = "SHORT"
+
             close_order = await self.exchange.place_order(
                 symbol=decision.symbol,
                 side=close_side,
                 order_type=OrderType.MARKET,
-                quantity=position.qty,
+                quantity=qty,
                 client_order_id=client_order_id,
-                reduce_only=True,
+                reduce_only=(position_mode == "ONE_WAY"),
+                position_side=(binance_position_side if position_mode == "HEDGE" else None),
             )
             close_order_id = str(close_order["orderId"])
         else:
