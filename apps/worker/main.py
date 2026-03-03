@@ -187,6 +187,26 @@ class TradingWorker:
 
     async def _process_user_trading(self, session: AsyncSession, user: User) -> None:
         """Execute one full trading iteration for a single user"""
+        
+        # Phase 8: Check session validity before trading
+        from apps.api.auth import SessionManager
+        
+        session_status = await SessionManager.check_session_valid(session, user)
+        if not session_status.get("valid", True):
+            # Session expired or in grace period
+            status = session_status.get("status")
+            if status == "grace_period_ended":
+                logger.warning(f"Session expired for {user.username}, closing positions")
+                if user.auto_close_on_logout:
+                    # Could implement graceful position closing here
+                    user.bot_enabled = False
+                    await session.commit()
+                return
+            elif status == "grace_period":
+                # User has grace period to recover - pause bot for now
+                logger.info(f"Session grace period active for {user.username}")
+                return
+        
         # Fetch config
         cfg_res = await session.execute(
             select(BotConfig).where(BotConfig.user_id == user.id, BotConfig.is_active == True).order_by(desc(BotConfig.id))

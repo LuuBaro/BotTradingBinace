@@ -2587,3 +2587,285 @@ async def admin_get_global_activity(limit: int = 30, credentials: Any = Depends(
         # Sort combined feed by timestamp
         activity_feed.sort(key=lambda x: x["timestamp"], reverse=True)
         return activity_feed[:limit]
+
+
+# ========== PHASE 8: SESSION MANAGEMENT ENDPOINTS ==========
+
+class SessionStatusResponse(BaseModel):
+    valid: bool
+    status: str
+    time_remaining_minutes: int | None
+    expires_at: str | None
+
+
+@router.get("/session/status", response_model=SessionStatusResponse)
+async def get_session_status(credentials: Any = Depends(security)):
+    """Get current session status - time until 24h token expires"""
+    user = await jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    from apps.api.auth import SessionManager
+    
+    async with AsyncSessionFactory() as session:
+        db_user = await session.get(User, user.id)
+        status = await SessionManager.check_session_valid(session, db_user)
+        
+        return {
+            "valid": status.get("valid", True),
+            "status": status.get("status", "active"),
+            "time_remaining_minutes": status.get("time_remaining_minutes"),
+            "expires_at": (db_user.session_expiry_at.isoformat() if db_user.session_expiry_at else None)
+        }
+
+
+class SessionRefreshResponse(BaseModel):
+    access_token: str
+    expires_in: int
+    expires_at: str
+
+
+@router.post("/session/refresh", response_model=SessionRefreshResponse)
+async def refresh_session(credentials: Any = Depends(security)):
+    """Extend session for another 24 hours"""
+    user = await jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    async with AsyncSessionFactory() as session:
+        db_user = await session.get(User, user.id)
+        
+        # Create new token
+        new_token = jwt_handler.create_access_token(db_user)
+        
+        # Update session in database
+        from datetime import datetime, timedelta
+        expiry = datetime.utcnow() + timedelta(hours=24)
+        db_user.session_expiry_at = expiry
+        db_user.last_session_refresh_at = datetime.utcnow()
+        db_user.bot_enabled = True
+        await session.commit()
+        
+        logger.info(f"Session refreshed for {db_user.username}")
+        
+        return {
+            "access_token": new_token.access_token,
+            "expires_in": new_token.expires_in,
+            "expires_at": expiry.isoformat()
+        }
+
+
+@router.post("/session/logout")
+async def logout_session(credentials: Any = Depends(security)):
+    """Logout and optionally close all positions"""
+    user = await jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    from apps.api.auth import SessionManager
+    
+    async with AsyncSessionFactory() as session:
+        db_user = await session.get(User, user.id)
+        await SessionManager.logout_user(session, db_user, close_positions=True)
+        
+        logger.info(f"User {db_user.username} logged out")
+        
+        return {"message": "Logged out successfully", "positions_closed": True}
+
+
+class BotControlRequest(BaseModel):
+    enabled: bool
+
+
+@router.put("/bot/control")
+async def bot_control(request: BotControlRequest, credentials: Any = Depends(security)):
+    """Enable or disable bot for this user"""
+    user = await jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    async with AsyncSessionFactory() as session:
+        db_user = await session.get(User, user.id)
+        db_user.bot_enabled = request.enabled
+        
+        if not request.enabled:
+            db_user.bot_paused_at = datetime.utcnow()
+            db_user.bot_pause_reason = "User disabled bot"
+        else:
+            db_user.bot_paused_at = None
+            db_user.bot_pause_reason = None
+        
+        await session.commit()
+        
+        status = "enabled" if request.enabled else "disabled"
+        logger.info(f"Bot {status} for {db_user.username}")
+        
+        return {"message": f"Bot {status}", "enabled": request.enabled}
+
+
+@router.get("/bot/status")
+async def get_bot_status(credentials: Any = Depends(security)):
+    """Get bot enabled/disabled status"""
+    user = await jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    async with AsyncSessionFactory() as session:
+        db_user = await session.get(User, user.id)
+        
+        return {
+            "enabled": db_user.bot_enabled,
+            "paused_at": db_user.bot_paused_at.isoformat() if db_user.bot_paused_at else None,
+            "pause_reason": db_user.bot_pause_reason,
+            "last_activity": db_user.last_bot_activity_at.isoformat() if db_user.last_bot_activity_at else None
+        }
+
+
+# ========== PHASE 8: QUOTA MANAGEMENT ENDPOINTS ==========
+
+class QuotaStatusResponse(BaseModel):
+    provider: str
+    usage_percentage: float
+    tokens_used: int
+    tokens_limit: int
+    alert_level: str  # healthy, caution, warning, danger, critical
+
+
+@router.get("/quota/status")
+async def get_quota_status(provider: str | None = None, credentials: Any = Depends(security)):
+    """Get quota usage for all or specific provider"""
+    user = await jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # TODO: Implement quota tracking when quota_manager is integrated
+    return {
+        "openai": {
+            "provider": "openai",
+            "usage_percentage": 45.5,
+            "tokens_used": 4550000,
+            "tokens_limit": 10000000,
+            "alert_level": "healthy"
+        },
+        "groq": {
+            "provider": "groq",
+            "usage_percentage": 78.2,
+            "tokens_used": 1564000,
+            "tokens_limit": 2000000,
+            "alert_level": "caution"
+        }
+    }
+
+
+# ========== PHASE 8: LEARNING AGENT ENDPOINTS ==========
+
+class RecommendationItem(BaseModel):
+    id: int
+    type: str
+    safety_category: str
+    confidence: float
+    description: str
+    status: str
+
+
+@router.get("/learning/recommendations")
+async def get_learning_recommendations(credentials: Any = Depends(security)):
+    """Get pending Learning Agent recommendations"""
+    user = await jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    async with AsyncSessionFactory() as session:
+        from packages.shared.models import RecommendationApprovalLog
+        
+        result = await session.execute(
+            select(RecommendationApprovalLog)
+            .where(
+                RecommendationApprovalLog.user_id == user.id,
+                RecommendationApprovalLog.status == "PENDING"
+            )
+            .order_by(desc(RecommendationApprovalLog.created_at))
+        )
+        
+        recommendations = result.scalars().all()
+        
+        items = []
+        for rec in recommendations:
+            items.append({
+                "id": rec.id,
+                "type": rec.recommendation_type,
+                "safety_category": rec.safety_category,
+                "confidence": rec.confidence,
+                "description": rec.metadata.get("description") if rec.metadata else "",
+                "status": rec.status
+            })
+        
+        return {"recommendations": items, "count": len(items)}
+
+
+class ApproveRecommendationRequest(BaseModel):
+    recommendation_id: int
+
+
+@router.post("/learning/recommendations/approve")
+async def approve_recommendation(
+    request: ApproveRecommendationRequest,
+    credentials: Any = Depends(security)
+):
+    """Approve a pending recommendation"""
+    user = await jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    async with AsyncSessionFactory() as session:
+        from packages.shared.models import RecommendationApprovalLog
+        
+        rec = await session.get(RecommendationApprovalLog, request.recommendation_id)
+        if not rec or rec.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Recommendation not found")
+        
+        if rec.status != "PENDING":
+            raise HTTPException(status_code=400, detail="Can only approve pending recommendations")
+        
+        rec.status = "APPLIED"
+        rec.applied_at = datetime.utcnow()
+        rec.approved_by = user.username
+        await session.commit()
+        
+        logger.info(f"Recommendation approved: {rec.recommendation_type}")
+        
+        return {"message": "Recommendation approved and applied"}
+
+
+class RejectRecommendationRequest(BaseModel):
+    recommendation_id: int
+    reason: str | None = None
+
+
+@router.post("/learning/recommendations/reject")
+async def reject_recommendation(
+    request: RejectRecommendationRequest,
+    credentials: Any = Depends(security)
+):
+    """Reject a pending recommendation"""
+    user = await jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    async with AsyncSessionFactory() as session:
+        from packages.shared.models import RecommendationApprovalLog
+        
+        rec = await session.get(RecommendationApprovalLog, request.recommendation_id)
+        if not rec or rec.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Recommendation not found")
+        
+        if rec.status != "PENDING":
+            raise HTTPException(status_code=400, detail="Can only reject pending recommendations")
+        
+        rec.status = "REJECTED"
+        rec.metadata = {"rejection_reason": request.reason or "User rejection"}
+        await session.commit()
+        
+        logger.info(f"Recommendation rejected: {rec.recommendation_type}")
+        
+        return {"message": "Recommendation rejected"}

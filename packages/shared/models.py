@@ -40,10 +40,27 @@ class User(Base):
     is_whitelisted: Mapped[bool] = mapped_column(Boolean, default=False)
     is_blacklisted: Mapped[bool] = mapped_column(Boolean, default=False)
     
+    # Phase 8: Session Management for 24h token expiry handling
+    bot_enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    last_session_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_session_refresh_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    session_expiry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    auto_close_on_logout: Mapped[bool] = mapped_column(Boolean, default=True)
+    grace_period_minutes: Mapped[int] = mapped_column(Integer, default=15)
+    graceful_exit_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_bot_activity_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    bot_paused_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    bot_pause_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    
     # Metadata
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        Index("ix_session_expiry", "session_expiry_at"),
+        Index("ix_last_activity", "last_bot_activity_at"),
+    )
 
 
 class UserLoginLog(Base):
@@ -408,3 +425,67 @@ class UserCredential(Base):
     ai_custom_endpoint: Mapped[str | None] = mapped_column(String(255), nullable=True)
     
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SessionLog(Base):
+    """Session tracking for 24h token expiry management"""
+
+    __tablename__ = "session_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(50), ForeignKey("users.id"), index=True, nullable=False)
+    session_token: Mapped[str] = mapped_column(String(500), nullable=False)
+    login_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    logout_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expired_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", index=True)  # ACTIVE, EXPIRED, CLOSED
+    positions_at_logout: Mapped[int] = mapped_column(Integer, default=0)
+    action_taken: Mapped[str | None] = mapped_column(String(50), nullable=True)  # GRACEFUL_CLOSE, FORCE_CLOSE, PAUSE
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_session_user_status", "user_id", "status"),
+    )
+
+
+class QuotaLog(Base):
+    """Track API quota usage per user per provider"""
+
+    __tablename__ = "quota_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(50), ForeignKey("users.id"), index=True, nullable=False)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # openai, anthropic, gemini, groq
+    timestamp: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    request_type: Mapped[str] = mapped_column(String(50), nullable=False)  # decision, analysis, recommendation
+    tokens_used: Mapped[int] = mapped_column(Integer, nullable=False)
+    response_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    success: Mapped[bool] = mapped_column(Boolean, default=True)
+    error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_quota_user_provider", "user_id", "provider"),
+    )
+
+
+class RecommendationApprovalLog(Base):
+    """Track Learning Agent recommendations and approvals"""
+
+    __tablename__ = "recommendation_approval_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(50), ForeignKey("users.id"), index=True, nullable=False)
+    recommendation_type: Mapped[str] = mapped_column(String(100), nullable=False)  # reduce_position_size, increase_leverage, etc
+    safety_category: Mapped[str] = mapped_column(String(20), nullable=False)  # SAFE, MODERATE, RISKY
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    approved_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    previous_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    current_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)  # PENDING, APPROVED, APPLIED, REJECTED
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    __table_args__ = (
+        Index("ix_recommend_user_status", "user_id", "status"),
+    )

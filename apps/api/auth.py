@@ -9,7 +9,8 @@ from pydantic import BaseModel
 from packages.shared.config import settings
 from packages.shared.logger import logger
 from packages.shared.database import AsyncSessionFactory
-from packages.shared.models import User, UserLoginLog
+from packages.shared.models import User, UserLoginLog, SessionLog, Position
+from sqlalchemy.ext.asyncio import AsyncSession
 import hashlib
 import uuid
 import asyncio
@@ -29,18 +30,17 @@ class UserAuth(BaseModel):
 
 
 class JWTHandler:
-    """JWT token management"""
+    """JWT token management with session tracking"""
 
     def __init__(self, secret_key: str, algorithm: str = "HS256"):
         self.secret_key = secret_key
         self.algorithm = algorithm
-        self.access_token_expire_minutes = 1440  # 24 hours
+        self.access_token_expire_hours = 24
 
     def create_access_token(self, user: User) -> Token:
-        """Create JWT access token"""
-        expire = datetime.now(timezone.utc) + timedelta(
-            minutes=self.access_token_expire_minutes
-        )
+        """Create JWT access token with session tracking"""
+        expire_delta = timedelta(hours=self.access_token_expire_hours)
+        expire = datetime.now(timezone.utc) + expire_delta
 
         payload = {
             "sub": user.id,
@@ -48,6 +48,7 @@ class JWTHandler:
             "role": user.role,
             "exp": expire,
             "iat": datetime.now(timezone.utc),
+            "session_id": str(uuid.uuid4()),
         }
 
         encoded_jwt = jwt.encode(
@@ -56,8 +57,35 @@ class JWTHandler:
 
         return Token(
             access_token=encoded_jwt,
-            expires_in=self.access_token_expire_minutes * 60,
+            expires_in=int(expire_delta.total_seconds()),
         )
+    
+    async def register_session(
+        self,
+        session: AsyncSession,
+        user: User,
+        token: str
+    ) -> None:
+        """Register new session for user"""
+        
+        expiry = datetime.utcnow() + timedelta(hours=self.access_token_expire_hours)
+        
+        user.last_session_token = token[:100] if token else None
+        user.last_session_refresh_at = datetime.utcnow()
+        user.session_expiry_at = expiry
+        user.graceful_exit_at = None
+        user.bot_enabled = True
+        
+        # Log session
+        log = SessionLog(
+            user_id=user.id,
+            session_token=token[:100] if token else "unknown",
+            login_at=datetime.utcnow(),
+            expired_at=expiry,
+            status="ACTIVE"
+        )
+        session.add(log)
+        await session.commit()
 
     def decode_token(self, token: str) -> Optional[Dict[str, Any]]:
         """Decode and validate JWT token"""
@@ -85,6 +113,77 @@ class JWTHandler:
             result = await session.execute(select(User).where(User.id == user_id))
             user = result.scalar_one_or_none()
             return user
+
+
+class SessionManager:
+    """Manage user session lifecycle and 24h token expiry"""
+    
+    @staticmethod
+    async def check_session_valid(
+        session: AsyncSession,
+        user: User
+    ) -> Dict[str, Any]:
+        """Check if user's session is still valid"""
+        
+        if not user.session_expiry_at:
+            return {
+                "valid": True,
+                "status": "no_session_tracking",
+                "time_remaining_minutes": None
+            }
+        
+        now = datetime.utcnow()
+        time_remaining = user.session_expiry_at - now
+        
+        # Session expired?
+        if now > user.session_expiry_at:
+            # In grace period?
+            grace_end = user.session_expiry_at + timedelta(minutes=user.grace_period_minutes)
+            if now > grace_end:
+                return {
+                    "valid": False,
+                    "status": "grace_period_ended",
+                    "time_remaining_minutes": 0,
+                    "action_required": "force_close"
+                }
+            else:
+                grace_remaining = (grace_end - now).total_seconds() / 60
+                return {
+                    "valid": False,
+                    "status": "grace_period",
+                    "grace_remaining_minutes": int(grace_remaining),
+                    "time_remaining_minutes": 0
+                }
+        
+        return {
+            "valid": True,
+            "status": "active",
+            "time_remaining_minutes": int(time_remaining.total_seconds() / 60)
+        }
+    
+    @staticmethod
+    async def logout_user(
+        session: AsyncSession,
+        user: User,
+        close_positions: bool = True
+    ) -> None:
+        """User-initiated logout"""
+        
+        user.session_expiry_at = datetime.utcnow()
+        user.bot_enabled = False
+        
+        # Log logout
+        log = SessionLog(
+            user_id=user.id,
+            session_token=user.last_session_token or "unknown",
+            login_at=datetime.utcnow(),
+            logout_at=datetime.utcnow(),
+            expired_at=datetime.utcnow(),
+            status="CLOSED",
+            action_taken="CLOSED_ALL" if close_positions else "BOT_PAUSED"
+        )
+        session.add(log)
+        await session.commit()
 
 
 class DatabaseUserManager:
