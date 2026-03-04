@@ -11,7 +11,7 @@ from packages.shared.trade_journal import TradeJournalEntry, ExitReason
 from packages.shared.learning_agent import LearningAgent, SuggestedAdaptations
 from packages.shared.database import AsyncSessionFactory, get_db
 from packages.shared.models import TradeJournal as TradeJournalModel, TraderContext
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, delete
 import aiohttp
 import asyncio
 from datetime import timezone
@@ -1501,9 +1501,14 @@ async def add_news_source(payload: Dict[str, Any], db: AsyncSession = Depends(ge
 
 @router.delete("/intelligence/sources/{source_id}")
 async def delete_news_source(source_id: int, db: AsyncSession = Depends(get_db)):
-    """Remove a news source"""
+    """Remove a news source and all associated logs"""
     try:
-        from packages.shared.models import NewsSource
+        from packages.shared.models import NewsSource, NewsLog
+        
+        # Delete all logs for this source first
+        await db.execute(delete(NewsLog).where(NewsLog.source_id == source_id))
+        
+        # Then delete the source
         result = await db.execute(select(NewsSource).where(NewsSource.id == source_id))
         source = result.scalar_one_or_none()
         if source:

@@ -3,7 +3,7 @@ import { useDashboardStore, useEventsStore } from '../store'
 import { createApiClient, getApiBaseUrl } from '../api/client'
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts'
 import { formatDistanceToNow, format } from 'date-fns'
-import { Activity, Shield, TrendingUp, Server, Clock, Database, Brain, ChevronRight, Info } from 'lucide-react'
+import { Activity, Shield, TrendingUp, Server, Clock, Database, Brain, ChevronRight, Info, Power } from 'lucide-react'
 
 export const OverviewPage: React.FC = () => {
   const {
@@ -19,6 +19,8 @@ export const OverviewPage: React.FC = () => {
   const [pnlBreakdown, setPnlBreakdown] = useState({ realized: 0, realizedTotal: 0, unrealized: 0 })
   const [walletBalance, setWalletBalance] = useState<any>(null)
   const [hoveredCardIndex, setHoveredCardIndex] = useState<number | null>(null)
+  const [tokenUsage, setTokenUsage] = useState<any>(null)
+  const [isPauseLoading, setIsPauseLoading] = useState(false)
 
   // Memoized API client
   const token = localStorage.getItem('token') || ''
@@ -28,7 +30,7 @@ export const OverviewPage: React.FC = () => {
     const fetchData = async () => {
       try {
         const days = timeRange === '1W' ? 7 : 1
-        const [status, posResponse, ordResponse, decisionsResponse, historyData, latencyData, healthData, walletData] = await Promise.all([
+        const [status, posResponse, ordResponse, decisionsResponse, historyData, latencyData, healthData, walletData, tokenData] = await Promise.all([
           api.getBotStatus(),
           api.getPositions(),
           api.getOrders(),
@@ -36,7 +38,8 @@ export const OverviewPage: React.FC = () => {
           api.getPnlHistory(days),
           api.getLatencyMetrics().catch(() => null),
           api.getHealthStatus().catch(() => null),
-          api.getWalletBalance().catch(() => null)
+            api.getWalletBalance().catch(() => null),
+            api.getLlmTokenUsage().catch(() => null)
         ])
 
         const currentPositions = Array.isArray(posResponse) ? posResponse : []
@@ -109,6 +112,10 @@ export const OverviewPage: React.FC = () => {
 
         if (walletData) {
           setWalletBalance(walletData)
+
+                if (tokenData) {
+                  setTokenUsage(tokenData)
+                }
         }
 
         setBotStatus({
@@ -131,6 +138,27 @@ export const OverviewPage: React.FC = () => {
 
   const uptimeHours = botStatus?.uptime_seconds ? Math.floor(botStatus.uptime_seconds / 3600) : 0
   const uptimeMinutes = botStatus?.uptime_seconds ? Math.floor((botStatus.uptime_seconds % 3600) / 60) : 0
+
+  const handleTogglePause = async () => {
+    if (!botStatus) return
+    
+    setIsPauseLoading(true)
+    
+    try {
+      const action = botStatus.paused ? api.resumeTrading() : api.pauseTrading()
+      await action
+      
+      // Update local state immediately for UX feedback
+      setBotStatus({
+        ...botStatus,
+        paused: !botStatus.paused
+      })
+    } catch (error) {
+      console.error('Toggle pause error:', error)
+    } finally {
+      setIsPauseLoading(false)
+    }
+  }
 
   // Effect to boost main container z-index when tooltip is open to prevent header overlap
   useEffect(() => {
@@ -181,6 +209,29 @@ export const OverviewPage: React.FC = () => {
               </span>
             </div>
           </div>
+          <button
+            onClick={handleTogglePause}
+            disabled={isPauseLoading}
+            className={`col-span-2 lg:col-span-1 px-4 md:px-5 py-3 rounded-2xl flex items-center gap-3 transition-all ${
+              botStatus?.paused
+                ? 'bg-red-500/10 border-red-500/30 hover:bg-red-500/20 hover:border-red-500/50'
+                : 'glass-dark border-white/5 hover:bg-emerald-500/10 hover:border-emerald-500/30'
+            } disabled:opacity-50 disabled:cursor-not-allowed group`}
+          >
+            <div className={`w-8 h-8 md:w-10 md:h-10 rounded-xl flex items-center justify-center border transition-all ${
+              botStatus?.paused
+                ? 'bg-red-500/10 border-red-500/20'
+                : 'bg-emerald-500/10 border-emerald-500/20 group-hover:bg-emerald-500/20'
+            }`}>
+              <Power className={botStatus?.paused ? 'text-red-400' : 'text-emerald-400'} size={16} />
+            </div>
+            <div>
+              <span className="text-[8px] md:text-[10px] font-black text-slate-500 uppercase tracking-widest block">Bot</span>
+              <span className={`text-sm md:text-lg font-black uppercase ${botStatus?.paused ? 'text-red-400' : 'text-emerald-400'}`}>
+                {isPauseLoading ? '...' : (botStatus?.paused ? 'Paused' : 'Running')}
+              </span>
+            </div>
+          </button>
         </div>
       </div>
 
@@ -190,7 +241,7 @@ export const OverviewPage: React.FC = () => {
           { label: 'Môi trường (Risk Mode)', value: botStatus?.mode || 'Demo', sub: botStatus?.paused ? 'SYSTEM PAUSED' : 'LIVE TRADING', color: 'text-blue-400', icon: <Server size={14} />, gradient: 'from-blue-500/10' },
           { label: 'Thời gian hoạt động', value: `${uptimeHours}h ${uptimeMinutes}m`, sub: `${positions.length} Vị thế đang mở`, color: 'text-purple-400', icon: <Clock size={14} />, gradient: 'from-purple-500/10' },
           { label: 'Alpha Hôm Nay (PnL)', value: `$${pnlToday.toFixed(2)}`, sub: `Kết quả giao dịch trong ngày`, color: pnlToday >= 0 ? 'text-emerald-400' : 'text-rose-400', icon: <TrendingUp size={14} />, gradient: pnlToday >= 0 ? 'from-emerald-500/10' : 'from-rose-500/10', tooltip: true },
-          { label: 'Sự kiện hệ thống', value: `${events.length}`, sub: 'Dữ liệu telemetry đang hoạt động', color: 'text-amber-400', icon: <Database size={14} />, gradient: 'from-amber-500/10' },
+          { label: 'Token Usage LLM', value: tokenUsage ? `${(tokenUsage.total_tokens || tokenUsage.tokens_actual || tokenUsage.total_tokens_estimated || tokenUsage.tokens_estimated || 0).toLocaleString()}` : '0', sub: tokenUsage ? `${tokenUsage.ai_calls_today || 0} AI calls hôm nay` : 'Đang tải...', color: 'text-cyan-400', icon: <Brain size={14} />, gradient: 'from-cyan-500/10', tooltip: true, tokenTooltip: true },
         ].map((stat, i) => (
           <div
             key={i}
@@ -208,7 +259,7 @@ export const OverviewPage: React.FC = () => {
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{stat.sub}</div>
 
             {/* PnL Tooltip */}
-            {stat.tooltip && hoveredCardIndex === i && (
+            {stat.tooltip && !stat.tokenTooltip && hoveredCardIndex === i && (
               <>
                 <div
                   className="fixed inset-0 bg-black/85 transition-opacity"
@@ -307,6 +358,127 @@ export const OverviewPage: React.FC = () => {
                         <span className="text-emerald-400 text-xs mt-0.5">ℹ️</span>
                         <p className="text-[9px] text-slate-400 leading-relaxed uppercase tracking-tighter">
                           Realized = Lệnh chốt | Unrealized = Đang chạy
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* Token Usage Tooltip */}
+            {stat.tokenTooltip && hoveredCardIndex === i && tokenUsage && (
+              <>
+                <div
+                  className="fixed inset-0 bg-black/85 transition-opacity"
+                  onClick={() => setHoveredCardIndex(null)}
+                  style={{
+                    zIndex: 99999998,
+                    backdropFilter: 'blur(8px)',
+                    WebkitBackdropFilter: 'blur(8px)'
+                  }}
+                />
+                <div className="fixed inset-0 z-[99999999] flex items-center justify-center p-4 pointer-events-none">
+                  <div className="w-[340px] max-w-full max-h-[90vh] bg-[#020617] border-2 border-cyan-500/40 rounded-3xl p-6 shadow-[0_0_100px_rgba(0,0,0,0.9)] pointer-events-auto relative overflow-y-auto custom-scrollbar">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setHoveredCardIndex(null); }}
+                      className="absolute top-4 right-4 w-8 h-8 rounded-xl bg-white/5 hover:bg-white/10 flex items-center justify-center text-slate-400 hover:text-white transition-all z-10"
+                    >
+                      ✕
+                    </button>
+
+                    <div className="space-y-4 relative z-1">
+                      <div className="pb-3 border-b border-white/5">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 bg-cyan-500/10 rounded-xl flex items-center justify-center border border-cyan-500/20">
+                            <Brain className="text-cyan-400" size={20} />
+                          </div>
+                          <div>
+                            <h3 className="text-sm font-black uppercase tracking-wider text-cyan-300">Token Usage</h3>
+                            <p className="text-[9px] text-slate-500 uppercase tracking-wide">LLM API Consumption</p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="bg-white/[0.03] rounded-xl p-4 border border-white/5">
+                          <div className="flex justify-between items-center">
+                            <div className="space-y-1">
+                              <div className="text-[10px] text-slate-400 uppercase tracking-wide font-semibold">Mode</div>
+                              <div className="text-[9px] text-cyan-300/60">{tokenUsage.mode === 'two_tier' ? '2-Tier Cascade' : 'Single LLM'}</div>
+                            </div>
+                            <div className="text-lg font-black text-cyan-400 uppercase">
+                              {tokenUsage.mode === 'two_tier' ? '🔀Scout→Verifier' : '🤖Single'}
+                            </div>
+                          </div>
+                        </div>
+
+                        {tokenUsage.mode === 'two_tier' ? (
+                          <>
+                            <div className="bg-white/[0.03] rounded-xl p-4 border border-white/5 hover:border-emerald-500/20 transition-all">
+                              <div className="space-y-2">
+                                <div className="flex justify-between items-center">
+                                  <div className="text-[10px] text-emerald-400 uppercase tracking-wide font-semibold">Scout (Lightweight)</div>
+                                  <div className="text-sm font-black font-mono text-emerald-400">{(tokenUsage.scout.tokens_estimated || 0).toLocaleString()}</div>
+                                </div>
+                                <div className="text-[9px] text-slate-500 space-y-0.5">
+                                  <div>Provider: <span className="text-emerald-300">{tokenUsage.scout.provider}</span></div>
+                                  <div>Model: <span className="text-emerald-300">{tokenUsage.scout.model}</span></div>
+                                  <div>Calls: <span className="text-emerald-300">{tokenUsage.scout.calls_today}</span></div>
+                                  <div className="text-[8px] text-emerald-300/60 italic">Estimated</div>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="bg-white/[0.03] rounded-xl p-4 border border-white/5 hover:border-purple-500/20 transition-all">
+                              <div className="space-y-2">
+                                <div className="flex justify-between items-center">
+                                  <div className="text-[10px] text-purple-400 uppercase tracking-wide font-semibold">Verifier (Detailed)</div>
+                                  <div className="text-sm font-black font-mono text-purple-400">{(tokenUsage.verifier.tokens_actual || tokenUsage.verifier.tokens_estimated || 0).toLocaleString()}</div>
+                                </div>
+                                <div className="text-[9px] text-slate-500 space-y-0.5">
+                                  <div>Provider: <span className="text-purple-300">{tokenUsage.verifier.provider}</span></div>
+                                  <div>Model: <span className="text-purple-300">{tokenUsage.verifier.model}</span></div>
+                                  <div>Calls: <span className="text-purple-300">{tokenUsage.verifier.calls_today}</span></div>
+                                  <div className="text-[8px] text-purple-300/60 italic">{tokenUsage.verifier.tokens_actual ? 'Actual from API' : 'Estimated'}</div>
+                                </div>
+                              </div>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="bg-white/[0.03] rounded-xl p-4 border border-white/5 hover:border-cyan-500/20 transition-all">
+                            <div className="space-y-2">
+                              <div className="flex justify-between items-center">
+                                <div className="text-[10px] text-cyan-400 uppercase tracking-wide font-semibold">LLM Provider</div>
+                                <div className="text-sm font-black font-mono text-cyan-400">{(tokenUsage.tokens_actual || tokenUsage.tokens_estimated || 0).toLocaleString()}</div>
+                              </div>
+                              <div className="text-[9px] text-slate-500 space-y-0.5">
+                                <div>Provider: <span className="text-cyan-300">{tokenUsage.provider}</span></div>
+                                <div>Model: <span className="text-cyan-300">{tokenUsage.model}</span></div>
+                                <div>Calls: <span className="text-cyan-300">{tokenUsage.ai_calls_today}</span></div>
+                                <div className="text-[8px] text-cyan-300/60 italic">{tokenUsage.tokens_actual ? 'Actual from API' : 'Estimated'}</div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="bg-cyan-500/10 rounded-xl p-5 border border-cyan-500/20 relative overflow-hidden mt-6">
+                          <div className="relative flex justify-between items-center">
+                            <div>
+                              <div className="text-[11px] font-black text-white uppercase tracking-widest">Total Today</div>
+                              <div className="text-[8px] text-cyan-300/60 mt-0.5">{tokenUsage.ai_calls_today} AI Decisions</div>
+                            </div>
+                            <div className="text-2xl font-black font-mono text-cyan-400">
+                              {(tokenUsage.total_tokens || tokenUsage.tokens_actual || tokenUsage.total_tokens_estimated || tokenUsage.tokens_estimated || 0).toLocaleString()}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-start gap-2 px-3 py-2 bg-white/5 rounded-lg">
+                        <span className="text-cyan-400 text-xs mt-0.5">ℹ️</span>
+                        <p className="text-[9px] text-slate-400 leading-relaxed uppercase tracking-tighter">
+                          {tokenUsage.note || 'Estimates based on average token usage'}
                         </p>
                       </div>
                     </div>

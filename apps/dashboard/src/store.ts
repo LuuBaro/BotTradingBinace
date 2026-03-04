@@ -3,11 +3,12 @@ import { create } from 'zustand'
 // Auth Store
 export interface AuthState {
   token: string | null
-  user: { id: string; username: string; role: string } | null
+  user: { id: string; username: string; email?: string; role: string } | null
   isAuthenticated: boolean
   setToken: (token: string) => void
   setUser: (user: AuthState['user']) => void
   logout: () => void
+  clearToken: () => void  // Alias for logout
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -23,6 +24,11 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ user })
   },
   logout: () => {
+    localStorage.removeItem('token')
+    localStorage.removeItem('user')
+    set({ token: null, user: null, isAuthenticated: false })
+  },
+  clearToken: () => {
     localStorage.removeItem('token')
     localStorage.removeItem('user')
     set({ token: null, user: null, isAuthenticated: false })

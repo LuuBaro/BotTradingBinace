@@ -77,6 +77,7 @@ class Decision(Base):
     decision_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     regime: Mapped[str] = mapped_column(String(20), nullable=False)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # Single-user context: will be set or left as admin
     
     # Phase 5: AI enhancement fields
     decision_type: Mapped[str | None] = mapped_column(String(20), nullable=True)  # ENTRY, EXIT, MODIFY, NO_TRADE
@@ -101,6 +102,9 @@ class Decision(Base):
     execution_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     execution_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
     execution_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    
+    # LLM token tracking
+    tokens_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
     
     # Validation
     is_valid_json: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -293,7 +297,7 @@ class NewsLog(Base):
     __tablename__ = "news_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    source_id: Mapped[int] = mapped_column(Integer, ForeignKey("news_sources.id"))
+    source_id: Mapped[int] = mapped_column(Integer, ForeignKey("news_sources.id", ondelete="CASCADE"))
     title: Mapped[str] = mapped_column(String(255), nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     url: Mapped[str | None] = mapped_column(String(255), nullable=True)

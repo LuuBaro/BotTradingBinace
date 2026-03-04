@@ -143,17 +143,24 @@ export const RiskConfigPage: React.FC = () => {
                       .join(' ')
 
                     const meta: Record<string, { unit: string, desc: string }> = {
+                      enabled: { unit: 'Bật/Tắt', desc: 'Kích hoạt hoặc vô hiệu hóa trading' },
                       max_leverage: { unit: 'x', desc: 'Hệ số đòn bẩy tối đa cho mỗi vị thế (VD: 5 = đòn bẩy 5x)' },
-                      max_position_size: { unit: '%', desc: 'Kích thước lệnh (vol) tối đa tính theo phần trăm tổng số dư khả dụng (VD: 0.1 = 10% ví)' },
-                      max_position_pct: { unit: '%', desc: 'Kích thước lệnh (vol) tối đa tính theo phần trăm tổng số dư khả dụng (VD: 0.1 = 10% ví)' },
-                      max_daily_loss: { unit: '%', desc: 'Mức thua lỗ tối đa cho phép trong ngày, tính theo % số dư (VD: 0.02 = ngừng trade nếu lỗ 2%)' },
-                      max_drawdown_day_pct: { unit: '%', desc: 'Giới hạn sụt giảm vốn (drawdown) tối đa trong ngày tính theo % tổng số dư' },
-                      min_win_rate: { unit: '%', desc: 'Tỷ lệ thắng (Win rate) tối thiểu hệ thống phải giữ để tiếp tục giao dịch' },
-                      max_risk_per_trade_pct: { unit: '%', desc: 'Mức rủi ro vốn lớn nhất trên MỘT lệnh dựa trên số dư (VD: 0.02 = rủi ro 2% tài khoản cho 1 lệnh)' },
-                      max_orders_per_hour: { unit: 'Lệnh', desc: 'Số lượng lệnh giao dịch (vào lệnh) tối đa được thực hiện trong khoảng thời gian một giờ' },
+                      max_position_pct: { unit: '%', desc: 'Kích thước lệnh tối đa theo % tổng số dư' },
+                      max_position_per_symbol: { unit: '%', desc: 'Kích thước lệnh tối đa trên một pair theo % tổng số dư' },
+                      max_drawdown_day_pct: { unit: '%', desc: 'Giới hạn sụt giảm vốn (drawdown) tối đa trong ngày' },
+                      max_daily_loss_pct: { unit: '%', desc: 'Mức thua lỗ tối đa trong ngày, đạt tới thì dừng trade' },
+                      max_risk_per_trade_pct: { unit: '%', desc: 'Mức rủi ro vốn lớn nhất trên MỘT lệnh (VD: 0.02 = rủi ro 2%)' },
+                      min_risk_reward_ratio: { unit: 'Tỉ lệ', desc: 'Tỉ lệ R/R tối thiểu cho AI lệnh (VD: 1.5 = nhất định kiếm được 1.5 so với rủi ro)' },
+                      min_confidence_level: { unit: '0.0-1.0', desc: 'Mức độ tin cậy tối thiểu của AI để thực hiện trade (0.7 = 70%)' },
+                      min_balance_threshold: { unit: 'USDT', desc: 'Số dư tối thiểu để cho phép trading' },
+                      max_orders_per_hour: { unit: 'Lệnh', desc: 'Số lượng lệnh tối đa trong 1 giờ' },
                       max_concurrent_positions: { unit: 'Lệnh', desc: 'Số lệnh (vị thế) đang chạy cùng lúc tối đa' },
-                      cooldown_after_loss: { unit: 'Giây', desc: 'Thời gian treo máy (tạm nghỉ) tính bằng giây sau khi dính 1 lệnh stoploss' },
-                      mandatory_sl_tp: { unit: 'Bật/Tắt', desc: 'Bắt buộc mọi vị thế mở do AI tạo ra đều phải cài sẵn Cắt lỗ (SL) và Chốt lời (TP)' }
+                      max_consecutive_losses: { unit: 'Lệnh', desc: 'Số losses liên tiếp tối đa trước khi tạm dừng' },
+                      cooldown_after_loss: { unit: 'Giây', desc: 'Thời gian treo máy sau khi dính stoploss' },
+                      recovery_days_after_max_loss: { unit: 'Ngày', desc: 'Tạm dừng trading bao nhiêu ngày sau khi đạt max drawdown' },
+                      mandatory_sl_tp: { unit: 'Bật/Tắt', desc: 'Bắt buộc mọi lệnh AI phải có SL và TP' },
+                      max_slippage_pct: { unit: '%', desc: 'Slippage tối đa chấp nhận (0.5% = 0.005)' },
+                      use_trailing_stop: { unit: 'Bật/Tắt', desc: 'Sử dụng trailing stop cho các lệnh exit' }
                     }
 
                     const fieldMeta = meta[key.toLowerCase()] || { unit: typeof value === 'number' ? 'NUM' : 'VAL', desc: 'Thông số hệ thống nâng cao' };

@@ -59,27 +59,63 @@ class Decision(BaseModel):
 class RiskConfig(BaseModel):
     """Risk management configuration"""
 
+    # Core Risk Management
+    enabled: bool = Field(default=True, description="Enable/disable trading")
     max_drawdown_day_pct: float = Field(
         default=0.05, description="Max daily drawdown as % of balance"
     )
+    max_daily_loss_pct: float = Field(
+        default=0.03, description="Max daily loss % before stopping all trades"
+    )
     max_position_pct: float = Field(
-        default=0.3, description="Max position size as % of balance"
+        default=0.15, description="Max position size as % of balance (reduced for safety)"
+    )
+    max_position_per_symbol: float = Field(
+        default=0.08, description="Max position size on single symbol as % of balance"
     )
     max_leverage: int = Field(default=5, description="Maximum leverage allowed")
     max_risk_per_trade_pct: float = Field(
         default=0.02, description="Max risk per trade as % of balance"
     )
+    
+    # Order Management
     max_orders_per_hour: int = Field(default=10, description="Max orders per hour")
     max_concurrent_positions: int = Field(default=3, description="Max concurrent positions")
-    cooldown_after_loss: int = Field(
-        default=300, description="Cooldown seconds after a loss"
+    max_consecutive_losses: int = Field(default=3, description="Max consecutive losses before pause")
+    
+    # Risk/Reward & Confidence
+    min_risk_reward_ratio: float = Field(
+        default=1.5, description="Minimum risk:reward ratio for AI decisions"
     )
+    min_confidence_level: float = Field(
+        default=0.7, ge=0.0, le=1.0, description="Minimum AI confidence to execute trade (0.0-1.0)"
+    )
+    min_balance_threshold: float = Field(
+        default=100.0, description="Minimum account balance to trade (in USDT)"
+    )
+    
+    # Cooldown & Recovery
+    cooldown_after_loss: int = Field(
+        default=600, description="Cooldown seconds after a loss (increased to 10 min)"
+    )
+    recovery_days_after_max_loss: int = Field(
+        default=1, description="Pause trading for N days after hitting max drawdown"
+    )
+    
+    # Execution Controls
     mandatory_sl_tp: bool = Field(default=True, description="Require SL/TP on all trades")
+    max_slippage_pct: float = Field(
+        default=0.005, description="Max slippage tolerance as % (0.5%)"
+    )
+    use_trailing_stop: bool = Field(default=True, description="Use trailing stop for exits")
 
     @field_validator(
         "max_drawdown_day_pct",
+        "max_daily_loss_pct",
         "max_position_pct",
+        "max_position_per_symbol",
         "max_risk_per_trade_pct",
+        "max_slippage_pct",
     )
     @classmethod
     def validate_pct(cls, v: float) -> float:

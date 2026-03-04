@@ -176,7 +176,8 @@ Respond with ONLY valid JSON (no markdown):
                     "errors": [],
                     "raw_response": no_trade_reason,
                     "timestamp": datetime.utcnow(),
-                    "parsed_intent": parsed_intent
+                    "parsed_intent": parsed_intent,
+                    "tokens_used": 0
                 }
 
             # Step 4: Build LLM prompt - inject parsed trader intent for dynamic behavior
@@ -186,7 +187,7 @@ Respond with ONLY valid JSON (no markdown):
 
             # Step 5: Call LLM
             logger.info(f"Calling LLM ({self.llm.model}) for decision")
-            raw_response = await self.llm.generate(prompt)
+            raw_response, tokens_used = await self.llm.generate(prompt)
 
             # Step 6: Parse response
             decision_dict = self._parse_llm_response(raw_response)
@@ -206,7 +207,8 @@ Respond with ONLY valid JSON (no markdown):
                     "errors": errors,
                     "raw_response": raw_response[:500],
                     "timestamp": datetime.utcnow(),
-                    "parsed_intent": parsed_intent
+                    "parsed_intent": parsed_intent,
+                    "tokens_used": tokens_used
                 }
 
             # Step 8: Create AIDecisionOutput
@@ -221,7 +223,8 @@ Respond with ONLY valid JSON (no markdown):
                     "errors": business_errors,
                     "raw_response": raw_response[:500],
                     "timestamp": datetime.utcnow(),
-                    "parsed_intent": parsed_intent
+                    "parsed_intent": parsed_intent,
+                    "tokens_used": tokens_used
                 }
 
             logger.info(f"✅ Valid decision generated: {decision.decision_type} ({decision.confidence:.2%} confidence)")
@@ -232,7 +235,8 @@ Respond with ONLY valid JSON (no markdown):
                 "errors": [],
                 "raw_response": raw_response,
                 "timestamp": datetime.utcnow(),
-                "parsed_intent": parsed_intent  # Worker uses this for proactive monitoring
+                "parsed_intent": parsed_intent,  # Worker uses this for proactive monitoring
+                "tokens_used": tokens_used
             }
 
         except Exception as e:
@@ -594,7 +598,8 @@ STRICT EXECUTION RULES:
             "decision": None,
             "errors": [{"error": reason}],
             "raw_response": "",
-            "timestamp": datetime.utcnow()
+            "timestamp": datetime.utcnow(),
+            "tokens_used": 0
         }
 
     def _serialize_json(self, data: Any) -> str:

@@ -42,8 +42,8 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
           </div>
           {sidebarOpen && (
             <div className="flex flex-col animate-fadeIn">
-              <span className="font-black text-xl tracking-tighter text-white">ANTIGRAVITY</span>
-              <span className="text-[9px] font-black text-blue-400 uppercase tracking-[0.3em]">Quantum Engine</span>
+              <span className="font-black text-xl tracking-tighter text-white">TiznDBot</span>
+              <span className="text-[9px] font-black text-blue-400 uppercase tracking-[0.3em]">Trading Intelligence</span>
             </div>
           )}
         </div>

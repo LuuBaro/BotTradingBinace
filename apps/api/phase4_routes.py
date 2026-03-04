@@ -14,10 +14,12 @@ from datetime import datetime, timedelta
 import httpx
 import uuid
 import json
+import os
 
 from packages.shared.database import AsyncSessionFactory
 from packages.shared.logger import logger
 from packages.shared.config import settings
+from packages.shared.worker_state import worker_state
 from packages.shared.config_versioning import ConfigVersionManager
 from packages.shared.models import (
     Decision, 
@@ -38,6 +40,26 @@ from apps.api.websocket import ws_manager, WsStreamConnection
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class GoogleLoginRequest(BaseModel):
+    id_token: str
+
+
+class SetupTOTPRequest(BaseModel):
+    username: str
+    password: str
+
+
+class VerifyTOTPSetupRequest(BaseModel):
+    username: str
+    secret: str
+    code: str
+
+
+class Verify2FARequest(BaseModel):
+    username: str
+    code: str  # Either TOTP code or backup code
 
 
 router = APIRouter(tags=["dashboard"])
@@ -72,6 +94,10 @@ def _serialize_settings(mask_secrets: bool = True) -> dict:
         "anthropic_api_key": _mask_secret(settings.anthropic_api_key) if mask_secrets else settings.anthropic_api_key,
         "anthropic_model": settings.anthropic_model,
         "use_local_llm": settings.use_local_llm,
+        "custom_provider_name": settings.custom_provider_name,
+        "custom_provider_url": settings.custom_provider_url,
+        "custom_provider_key": _mask_secret(settings.custom_provider_key) if mask_secrets else settings.custom_provider_key,
+        "custom_provider_model": settings.custom_provider_model,
     }
 
 
@@ -91,7 +117,17 @@ class SettingsUpdate(BaseModel):
     openai_model: str | None = None
     anthropic_api_key: str | None = None
     anthropic_model: str | None = None
+    groq_api_key: str | None = None
+    groq_model: str | None = None
+    gemini_api_key: str | None = None
+    gemini_model: str | None = None
     use_local_llm: bool | None = None
+    worker_ai_mode: str | None = None
+    worker_ai_prompt_level: str | None = None
+    custom_provider_name: str | None = None
+    custom_provider_url: str | None = None
+    custom_provider_key: str | None = None
+    custom_provider_model: str | None = None
     persist: str | None = "both"  # env|db|both
 
 
@@ -111,17 +147,38 @@ async def login(request: LoginRequest):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
+        # Check if user has 2FA enabled
+        user_data = user_manager.users.get(request.username)
+        totp_enabled = user_data.get("totp_enabled", False) if user_data else False
+
+        # If 2FA enabled, return without JWT (frontend will ask for 2FA code)
+        if totp_enabled:
+            return {
+                "access_token": None,
+                "token_type": None,
+                "expires_in": None,
+                "totp_enabled": True,
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "role": user.role,
+                },
+            }
+
+        # If 2FA not enabled, create JWT and return
         token = jwt_handler.create_access_token(user)
 
-        logger.info("user_login", username=request.username, role=user.role)
+        logger.info("user_login", username=request.username, role=user.role, totp_enabled=False)
 
         return {
             "access_token": token.access_token,
             "token_type": token.token_type,
             "expires_in": token.expires_in,
+            "totp_enabled": False,
             "user": {
                 "id": user.id,
                 "username": user.username,
+                "email": user.email,
                 "role": user.role,
             },
         }
@@ -131,6 +188,258 @@ async def login(request: LoginRequest):
         import traceback
         exc_str = traceback.format_exc()
         return {"error": str(e), "traceback": exc_str}
+
+
+@router.post("/auth/google-login", response_model=dict)
+async def google_login(request: GoogleLoginRequest):
+    """Login via Google OAuth2"""
+    try:
+        # Get Google Client ID from settings or environment
+        google_client_id = (
+            settings.google_client_id or 
+            os.getenv("GOOGLE_CLIENT_ID")
+        )
+        
+        if not google_client_id:
+            raise HTTPException(
+                status_code=500,
+                detail="Google OAuth not configured"
+            )
+        
+        # Verify Google ID token
+        idinfo = jwt_handler.verify_google_token(
+            request.id_token,
+            google_client_id
+        )
+        
+        if not idinfo:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid Google token"
+            )
+        
+        # Get user info from Google token
+        email = idinfo.get("email")
+        name = idinfo.get("name")
+        google_id = idinfo.get("sub")
+        
+        if not email or not google_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid Google token data"
+            )
+        
+        # Get or create user
+        user = user_manager.get_or_create_user(email, name, google_id)
+        
+        # Create JWT token
+        token = jwt_handler.create_access_token(user)
+        
+        logger.info(
+            "user_login_google",
+            email=email,
+            username=user.username,
+            role=user.role
+        )
+        
+        return {
+            "access_token": token.access_token,
+            "token_type": token.token_type,
+            "expires_in": token.expires_in,
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "role": user.role,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("google_login_error", error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail="Authentication failed"
+        )
+
+
+@router.post("/auth/setup-totp")
+async def setup_totp(request: SetupTOTPRequest):
+    """Bước 1: Khởi động thiết lập 2FA (Google Authenticator)
+    Yêu cầu: username, password
+    Trả về: secret, qr_code (base64)
+    """
+    try:
+        if not request.username or not request.password:
+            raise HTTPException(status_code=400, detail="Username and password required")
+        
+        # Kiểm tra thông tin đăng nhập
+        if not user_manager.verify_password(request.username, request.password):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        
+        # Check if 2FA setup is allowed (only 1 user can setup on first init)
+        if not user_manager.is_2fa_setup_allowed(request.username):
+            raise HTTPException(
+                status_code=403, 
+                detail="Hệ thống đã khóa 2FA setup cho một user khác. Chỉ 1 user được phép setup lần đầu."
+            )
+        
+        # Generate TOTP secret
+        secret = jwt_handler.generate_totp_secret()
+        
+        # Generate QR code
+        qr_code = jwt_handler.get_totp_qrcode(secret, request.username)
+        
+        logger.info("totp_setup_initiated", username=request.username)
+        
+        return {
+            "secret": secret,
+            "qr_code": qr_code,
+            "instruction": "Sử dụng ứng dụng Google Authenticator để quét mã QR này"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("setup_totp_error", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to setup TOTP")
+
+
+@router.post("/auth/verify-totp-setup")
+async def verify_totp_setup(request: VerifyTOTPSetupRequest):
+    """Bước 2: Xác thực TOTP setup và nhận backup codes
+    Yêu cầu: username, secret, code (6 chữ số từ app)
+    Trả về: backup_codes
+    """
+    try:
+        if not request.username or not request.secret or not request.code:
+            raise HTTPException(status_code=400, detail="Username, secret, and code required")
+        
+        # Check if 2FA setup is allowed (only 1 user can setup on first init)
+        if not user_manager.is_2fa_setup_allowed(request.username):
+            raise HTTPException(
+                status_code=403, 
+                detail="Hệ thống đã khóa 2FA setupfor một user khác. Chỉ 1 user được phép setup lần đầu."
+            )
+        
+        # Verify TOTP code
+        if not jwt_handler.verify_totp(request.secret, request.code):
+            raise HTTPException(status_code=401, detail="Invalid TOTP code")
+        
+        # Generate backup codes
+        backup_codes = jwt_handler.generate_backup_codes(10)
+        
+        # Save TOTP setup
+        if not user_manager.setup_totp(request.username, request.secret, backup_codes):
+            raise HTTPException(status_code=400, detail="User not found")
+        
+        logger.info("totp_verification_success", username=request.username)
+        
+        return {
+            "message": "2FA setup successfully",
+            "backup_codes": [code["code"] for code in backup_codes],
+            "instruction": "Lưu lại 10 mã khôi phục này ở nơi an toàn. Mỗi mã dùng 1 lần."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("verify_totp_setup_error", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to verify TOTP setup")
+
+
+@router.post("/auth/verify-2fa")
+async def verify_2fa(request: Verify2FARequest):
+    """Xác thực 2FA khi đăng nhập
+    Yêu cầu: username, code (6 chữ số từ app hoặc mã backup)
+    Trả về: JWT token
+    """
+    try:
+        if not request.username or not request.code:
+            raise HTTPException(status_code=400, detail="Username and code required")
+        
+        user_data = user_manager.users.get(request.username)
+        if not user_data or not user_data.get("totp_enabled"):
+            raise HTTPException(status_code=400, detail="2FA not enabled for this user")
+        
+        secret = user_data.get("totp_secret")
+        
+        # Try TOTP first
+        if jwt_handler.verify_totp(secret, request.code):
+            user = user_manager.get_user(request.username)
+            token = jwt_handler.create_access_token(user)
+            
+            logger.info("2fa_verified_totp", username=request.username)
+            
+            return {
+                "access_token": token.access_token,
+                "token_type": token.token_type,
+                "expires_in": token.expires_in,
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                    "role": user.role,
+                },
+            }
+        
+        # Try backup code
+        if user_manager.verify_backup_code(request.username, request.code):
+            user = user_manager.get_user(request.username)
+            token = jwt_handler.create_access_token(user)
+            
+            remaining = user_manager.get_remaining_backup_codes(request.username)
+            
+            logger.info("2fa_verified_backup_code", username=request.username, remaining=remaining)
+            
+            return {
+                "access_token": token.access_token,
+                "token_type": token.token_type,
+                "expires_in": token.expires_in,
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                    "role": user.role,
+                },
+                "warning": f"Bạn vừa dùng mã khôi phục. Còn {remaining} mã có sẵn. Vui lòng setup lại Google Authenticator."
+            }
+        
+        raise HTTPException(status_code=401, detail="Invalid 2FA code")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("verify_2fa_error", error=str(e))
+        raise HTTPException(status_code=500, detail="2FA verification failed")
+
+
+@router.post("/auth/reset-totp")
+async def reset_totp(request: dict, credentials: Any = Depends(security)):
+    """Reset 2FA (vô hiệu hóa)
+    Yêu cầu: password (xác nhận)
+    """
+    try:
+        user = jwt_handler.verify_token(credentials.credentials)
+        if not user:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        
+        password = request.get("password", "").strip()
+        if not password:
+            raise HTTPException(status_code=400, detail="Password required")
+        
+        # Verify password
+        if not user_manager.verify_password(user.username, password):
+            raise HTTPException(status_code=401, detail="Invalid password")
+        
+        # Reset TOTP
+        if user_manager.reset_totp(user.username):
+            logger.info("totp_reset", username=user.username)
+            return {"message": "2FA has been disabled. You can setup a new one anytime."}
+        else:
+            raise HTTPException(status_code=400, detail="User not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("reset_totp_error", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to reset TOTP")
 
 
 @router.get("/system/status")
@@ -171,6 +480,70 @@ async def refresh_token(token: str, credentials: Any = Depends(security)):
     }
 
 
+@router.post("/auth/reset-password")
+async def reset_password(request: dict):
+    """Reset password for a user (demo only - no auth required)
+    Request: {"username": "admin"}
+    Response: {"message": "...", "temporary_password": "admin", "email": "admin@trading.bot"}
+    """
+    try:
+        username = request.get("username", "").strip()
+        if not username:
+            raise HTTPException(status_code=400, detail="Username is required")
+        
+        user = user_manager.get_user(username)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        temp_password = user_manager.reset_password(username)
+        
+        return {
+            "message": f"Password reset successful for {username}. Check your email or use the temporary password.",
+            "temporary_password": temp_password,
+            "email": user.email,
+            "instruction": f"Login with username '{username}' and password '{temp_password}', then change your password in Settings"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("password_reset_error", error=str(e))
+        raise HTTPException(status_code=500, detail="Password reset failed")
+
+
+@router.post("/auth/change-password")
+async def change_password(request: dict, credentials: Any = Depends(security)):
+    """Change user password (authenticated endpoint)
+    Request: {"old_password": "...", "new_password": "..."}
+    """
+    try:
+        user = jwt_handler.verify_token(credentials.credentials)
+        if not user:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        
+        old_password = request.get("old_password", "").strip()
+        new_password = request.get("new_password", "").strip()
+        
+        if not old_password or not new_password:
+            raise HTTPException(status_code=400, detail="Both old and new password are required")
+        
+        if not user_manager.verify_password(user.username, old_password):
+            raise HTTPException(status_code=401, detail="Old password is incorrect")
+        
+        if len(new_password) < 4:
+            raise HTTPException(status_code=400, detail="New password must be at least 4 characters")
+        
+        if user_manager.change_password(user.username, new_password):
+            logger.info("user_password_changed", username=user.username)
+            return {"message": "Password changed successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to change password")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("change_password_error", error=str(e))
+        raise HTTPException(status_code=500, detail="Password change failed")
+
+
 # ===== Bot Status Endpoints =====
 
 @router.get("/bot/status")
@@ -183,9 +556,9 @@ async def get_bot_status(credentials: Any = Depends(security)):
     async with AsyncSessionFactory() as db:
         # Get active config
         result = await db.execute(
-            select(BotConfig).where(BotConfig.is_active == True).order_by(desc(BotConfig.id))
+            select(BotConfig).where(BotConfig.is_active == True).order_by(desc(BotConfig.id)).limit(1)
         )
-        config = result.scalar_one_or_none()
+        config = result.scalars().first()
 
         if not config:
             # Fallback for fresh DB
@@ -239,7 +612,7 @@ async def get_bot_status(credentials: Any = Depends(security)):
             "last_decision_at": last_decision.timestamp.isoformat() if last_decision else None,
             "created_at": config.created_at.isoformat(),
             "uptime_seconds": uptime_seconds,
-            "paused": config.is_active is False, # Or check global state
+            "paused": worker_state["is_paused"], # Use global worker state
             "total_positions": positions_count,
             "total_orders": orders_count,
             "realized_pnl_today": realized_pnl,
@@ -1333,12 +1706,34 @@ async def update_settings(payload: SettingsUpdate, credentials: Any = Depends(se
         _set_if_provided("openai_api_key", payload.openai_api_key, "worker")
     if payload.anthropic_api_key:
         _set_if_provided("anthropic_api_key", payload.anthropic_api_key, "worker")
+    if payload.groq_api_key:
+        _set_if_provided("groq_api_key", payload.groq_api_key, "worker")
+    if payload.gemini_api_key:
+        _set_if_provided("gemini_api_key", payload.gemini_api_key, "worker")
     if payload.openai_model is not None:
         _set_if_provided("openai_model", payload.openai_model, "worker")
     if payload.anthropic_model is not None:
         _set_if_provided("anthropic_model", payload.anthropic_model, "worker")
+    if payload.groq_model is not None:
+        _set_if_provided("groq_model", payload.groq_model, "worker")
+    if payload.gemini_model is not None:
+        _set_if_provided("gemini_model", payload.gemini_model, "worker")
     if payload.use_local_llm is not None:
         _set_if_provided("use_local_llm", payload.use_local_llm, "worker")
+    if payload.worker_ai_mode is not None:
+        _set_if_provided("worker_ai_mode", payload.worker_ai_mode, "worker")
+    if payload.worker_ai_prompt_level is not None:
+        _set_if_provided("worker_ai_prompt_level", payload.worker_ai_prompt_level, "worker")
+    
+    # Custom Provider
+    if payload.custom_provider_name is not None:
+        _set_if_provided("custom_provider_name", payload.custom_provider_name, "worker")
+    if payload.custom_provider_url is not None:
+        _set_if_provided("custom_provider_url", payload.custom_provider_url, "worker")
+    if payload.custom_provider_key:
+        _set_if_provided("custom_provider_key", payload.custom_provider_key, "worker")
+    if payload.custom_provider_model is not None:
+        _set_if_provided("custom_provider_model", payload.custom_provider_model, "worker")
 
     persist = (payload.persist or "both").lower()
 
@@ -1359,7 +1754,17 @@ async def update_settings(payload: SettingsUpdate, credentials: Any = Depends(se
             "OPENAI_MODEL": settings.openai_model,
             "ANTHROPIC_API_KEY": settings.anthropic_api_key or "",
             "CLAUDE_MODEL": settings.anthropic_model,
+            "GROQ_API_KEY": settings.groq_api_key or "",
+            "GROQ_MODEL": settings.groq_model,
+            "GEMINI_API_KEY": settings.gemini_api_key or "",
+            "GEMINI_MODEL": settings.gemini_model,
             "USE_LOCAL_LLM": str(settings.use_local_llm).lower(),
+            "WORKER_AI_MODE": settings.worker_ai_mode or "two_tier_hybrid",
+            "WORKER_AI_PROMPT_LEVEL": settings.worker_ai_prompt_level or "standard",
+            "CUSTOM_PROVIDER_NAME": settings.custom_provider_name or "",
+            "CUSTOM_PROVIDER_URL": settings.custom_provider_url or "",
+            "CUSTOM_PROVIDER_KEY": settings.custom_provider_key or "",
+            "CUSTOM_PROVIDER_MODEL": settings.custom_provider_model or "",
         }
         for key, value in env_updates.items():
             set_key(str(ENV_PATH), key, value if value is not None else "")
@@ -1431,8 +1836,16 @@ async def pause_action(credentials: Any = Depends(security)):
 
     logger.info("pause_action_triggered", user=user.username)
 
-    # TODO: Call worker pause endpoint
-    return {"detail": "Trading paused"}
+    # Update global worker state
+    worker_state["is_paused"] = True
+    worker_state["pause_reason"] = f"Manual pause by {user.username}"
+    worker_state["paused_at"] = datetime.utcnow().isoformat()
+    
+    return {
+        "status": "success",
+        "detail": "Trading paused",
+        "paused_at": worker_state["paused_at"]
+    }
 
 
 @router.post("/actions/resume")
@@ -1444,8 +1857,34 @@ async def resume_action(credentials: Any = Depends(security)):
 
     logger.info("resume_action_triggered", user=user.username)
 
-    # TODO: Call worker resume endpoint
-    return {"detail": "Trading resumed"}
+    # Calculate pause duration before clearing state
+    paused_duration = 0
+    if worker_state["paused_at"]:
+        paused_duration = (
+            datetime.utcnow() - datetime.fromisoformat(worker_state["paused_at"])
+        ).total_seconds()
+    
+    # Update global worker state
+    worker_state["is_paused"] = False
+    worker_state["pause_reason"] = None
+    
+    async with AsyncSessionFactory() as db:
+        # Log resume event
+        event = Event(
+            timestamp=datetime.utcnow(),
+            level="INFO",
+            code="WORKER_RESUMED",
+            message=f"Worker resumed by {user.username} after {paused_duration:.1f}s pause",
+            data_json={"paused_duration_sec": paused_duration, "resumed_by": user.username},
+        )
+        db.add(event)
+        await db.commit()
+    
+    return {
+        "status": "success",
+        "detail": "Trading resumed",
+        "paused_duration_sec": paused_duration
+    }
 
 
 @router.post("/actions/sync_now")

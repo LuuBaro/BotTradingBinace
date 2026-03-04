@@ -55,6 +55,11 @@ logs/
 htmlcov/
 .tox/
 
+# Test files with API keys (NEVER commit these)
+test_*_api.py
+list_*_models.py
+*_api_test.py
+
 # Node.js (for web app)
 node_modules/
 .pnpm-store/

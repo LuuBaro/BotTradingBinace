@@ -5,7 +5,7 @@ Supports OpenAI (GPT-4) and Anthropic (Claude)
 import os
 import json
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import httpx
 from datetime import datetime
 
@@ -20,8 +20,8 @@ class LLMAdapter(ABC):
         self.max_tokens = max_tokens
 
     @abstractmethod
-    async def generate(self, prompt: str) -> str:
-        """Generate response from LLM"""
+    async def generate(self, prompt: str) -> Tuple[str, int]:
+        """Generate response from LLM. Returns (content, tokens_used)"""
         pass
 
     @abstractmethod
@@ -46,8 +46,8 @@ class OpenAIAdapter(LLMAdapter):
         super().__init__(api_key, model, temperature, max_tokens)
         self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
-    async def generate(self, prompt: str) -> str:
-        """Generate response using OpenAI API"""
+    async def generate(self, prompt: str) -> Tuple[str, int]:
+        """Generate response using OpenAI API. Returns (content, tokens_used)"""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
@@ -79,7 +79,9 @@ class OpenAIAdapter(LLMAdapter):
 
                 if response.status_code == 200:
                     data = response.json()
-                    return data["choices"][0]["message"]["content"].strip()
+                    content = data["choices"][0]["message"]["content"].strip()
+                    tokens_used = data.get("usage", {}).get("total_tokens", 0)
+                    return (content, tokens_used)
                 else:
                     raise Exception(f"OpenAI API error: {response.status_code} - {response.text}")
 
@@ -122,8 +124,8 @@ class ClaudeAdapter(LLMAdapter):
         super().__init__(api_key, model, temperature, max_tokens)
         self.base_url = "https://api.anthropic.com/v1"
 
-    async def generate(self, prompt: str) -> str:
-        """Generate response using Claude API"""
+    async def generate(self, prompt: str) -> Tuple[str, int]:
+        """Generate response using Claude API. Returns (content, tokens_used)"""
         headers = {
             "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01",
@@ -153,7 +155,9 @@ class ClaudeAdapter(LLMAdapter):
 
                 if response.status_code == 200:
                     data = response.json()
-                    return data["content"][0]["text"].strip()
+                    content = data["content"][0]["text"].strip()
+                    tokens_used = data.get("usage", {}).get("input_tokens", 0) + data.get("usage", {}).get("output_tokens", 0)
+                    return (content, tokens_used)
                 else:
                     raise Exception(f"Claude API error: {response.status_code} - {response.text}")
 
@@ -232,8 +236,8 @@ class MockLLMAdapter(LLMAdapter):
     def __init__(self):
         super().__init__("mock", "mock-model", 0.3, 2000)
 
-    async def generate(self, prompt: str) -> str:
-        """Return mock trading decision"""
+    async def generate(self, prompt: str) -> Tuple[str, int]:
+        """Return mock trading decision. Returns (content, tokens_used)"""
         mock_decision = {
             "decision_type": "ENTRY",
             "confidence": 0.75,
@@ -263,7 +267,7 @@ class MockLLMAdapter(LLMAdapter):
                 "daily_loss_pct": 0.8
             }
         }
-        return json.dumps(mock_decision)
+        return (json.dumps(mock_decision), 0)
 
     async def validate_connection(self) -> bool:
         """Mock always connected"""
@@ -282,10 +286,14 @@ def get_llm_adapter(
     provider = provider.lower()
 
     if provider == "openai":
+        # NEVER auto-switch to Groq when OpenAI is explicitly requested
+        # If the key is wrong, let it fail during API call so the error is clear
         if api_key and api_key.startswith("gsk_"):
-            # Auto-correct model name if it's an OpenAI default
-            effective_model = model if model and "gpt" not in model.lower() else "llama-3.1-8b-instant"
-            return GroqAdapter(api_key, effective_model, temperature, max_tokens)
+            raise ValueError(
+                "OpenAI provider requested but Groq API key provided (starts with 'gsk_'). "
+                "Please check your OPENAI_API_KEY environment variable or .env file. "
+                "It should start with 'sk-' for OpenAI keys."
+            )
         return OpenAIAdapter(api_key, model or "gpt-4-turbo", temperature, max_tokens)
     elif provider == "claude" or provider == "anthropic":
         return ClaudeAdapter(api_key, model or "claude-3-opus-20240229", temperature, max_tokens)

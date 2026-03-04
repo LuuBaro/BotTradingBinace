@@ -24,6 +24,7 @@ from packages.shared.models import (
 )
 from packages.shared.schemas import RiskConfig
 from packages.shared.logger import logger
+from packages.shared.worker_state import worker_state
 from apps.api.phase4_routes import router as phase4_router
 from apps.api.phase6_routes import router as phase6_router
 from apps.api.websocket import ws_manager
@@ -170,14 +171,6 @@ async def update_risk_config(
 
 # === Worker Control Endpoints (Phase 2) ===
 
-# Global state for worker control
-worker_state = {
-    "is_paused": False,
-    "pause_reason": None,
-    "paused_at": None,
-}
-
-
 @app.post("/actions/pause")
 async def pause_worker(reason: str = "Manual pause"):
     """Pause worker (stop new orders)"""
@@ -285,6 +278,72 @@ async def get_circuit_breaker_status():
         "circuit_breaker": circuit_breaker.get_status(),
         "safe_for_trading": circuit_breaker.is_safe_for_trading(),
     }
+
+
+# === LLM Token Usage Endpoint ===
+
+@app.get("/api/llm/token-usage")
+async def get_llm_token_usage(db: AsyncSession = Depends(get_db)):
+    """
+    Get LLM token usage statistics (actual usage, not estimated)
+    Returns dynamic data based on user's LLM configuration
+    """
+    # Get today's AI decisions
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    result = await db.execute(
+        select(Decision).where(Decision.timestamp >= today_start)
+    )
+    decisions_today = result.scalars().all()
+    ai_calls_today = len(decisions_today)
+    
+    # Sum actual tokens used from all decisions
+    total_tokens_used = sum(d.tokens_used or 0 for d in decisions_today)
+    
+    # Determine LLM configuration
+    if settings.worker_ai_use_two_tier:
+        # 2-tier mode: scout + verifier
+        scout_provider = settings.worker_ai_scout_provider
+        scout_model = settings.worker_ai_scout_model
+        verifier_provider = settings.worker_ai_verifier_provider
+        verifier_model = settings.worker_ai_verifier_model
+        
+        # In 2-tier mode, we only store verifier tokens (scout is not saved to DB)
+        # Estimate scout tokens based on call count
+        scout_calls = ai_calls_today
+        verifier_calls = ai_calls_today  # Each decision = 1 verifier call
+        scout_tokens_estimated = scout_calls * 200  # Scout uses ~200 tokens
+        
+        return {
+            "mode": "two_tier",
+            "ai_calls_today": ai_calls_today,
+            "scout": {
+                "provider": scout_provider,
+                "model": scout_model,
+                "calls_today": scout_calls,
+                "tokens_estimated": scout_tokens_estimated,
+            },
+            "verifier": {
+                "provider": verifier_provider,
+                "model": verifier_model,
+                "calls_today": verifier_calls,
+                "tokens_actual": total_tokens_used,
+            },
+            "total_tokens": total_tokens_used + scout_tokens_estimated,
+            "note": "Verifier tokens are actual from OpenAI API. Scout tokens estimated.",
+        }
+    else:
+        # Single-tier mode: one LLM for everything
+        provider = settings.selected_llm
+        model = settings.openai_model if provider in ('openai', 'groq') else settings.anthropic_model
+        
+        return {
+            "mode": "single_tier",
+            "ai_calls_today": ai_calls_today,
+            "provider": provider,
+            "model": model,
+            "tokens_actual": total_tokens_used,
+            "note": "Actual token usage from API responses.",
+        }
 
 
 # === WebSocket Endpoint ===

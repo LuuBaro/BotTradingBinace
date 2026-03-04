@@ -27,16 +27,26 @@ async def seed_database():
             logger.info("database_already_seeded")
             return
         
-        # Create default risk config
+        # Create default risk config with enhanced safety parameters
         risk_config = RiskConfig(
+            enabled=True,
             max_drawdown_day_pct=0.05,
-            max_position_pct=0.3,
+            max_daily_loss_pct=0.03,
+            max_position_pct=0.15,
+            max_position_per_symbol=0.08,
             max_leverage=5,
             max_risk_per_trade_pct=0.02,
             max_orders_per_hour=10,
             max_concurrent_positions=3,
-            cooldown_after_loss=300,
+            max_consecutive_losses=3,
+            min_risk_reward_ratio=1.5,
+            min_confidence_level=0.7,
+            min_balance_threshold=100.0,
+            cooldown_after_loss=600,
+            recovery_days_after_max_loss=1,
             mandatory_sl_tp=True,
+            max_slippage_pct=0.005,
+            use_trailing_stop=True,
         )
         
         # Create default bot config

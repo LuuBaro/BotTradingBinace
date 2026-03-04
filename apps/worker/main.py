@@ -2,12 +2,21 @@
 Worker Main Loop - Trading engine orchestrator
 Coordinates AI decision making, risk validation, and execution
 """
+# *** CRITICAL: Clean environment BEFORE any packages.shared imports ***
+# (because packages.shared.__init__.py imports settings)
+import os
+openai_key = os.environ.get("OPENAI_API_KEY", "")
+if openai_key.startswith("gsk_"):
+    print("[CLEANUP] Removing contaminated Groq API key from os.environ...")
+    del os.environ["OPENAI_API_KEY"]
+    print("[CLEANUP] Removed. Pydantic will load from .env file instead.")
+
 import asyncio
 import signal
 import sys
 import uuid
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import select, desc
 from packages.shared.config import settings
 from packages.shared.database import AsyncSessionFactory, init_db, close_db
@@ -29,6 +38,7 @@ from packages.shared.logger import logger
 from apps.worker.engine.execution import ExecutionEngine
 from apps.worker.engine.reconciler import ReconcilerEngine
 from packages.shared.ai_orchestrator import AIOrchestrator
+from packages.shared.ai_scout import AIScout, ScoutSignal
 from packages.shared.llm_adapter import get_llm_adapter
 from packages.shared.prompt_pack import PromptPackSchema, RegimeDefinition, EntryPlaybook, ExitPlaybook, TimeFrame
 from packages.shared.models import TraderContext
@@ -60,6 +70,7 @@ class TradingWorker:
         self.reconciler = ReconcilerEngine(self.exchange)
         self.risk_engine: RiskEngine | None = None
         self.orchestrator: AIOrchestrator | None = None
+        self.scout: AIScout | None = None  # Lightweight scanner (2-tier mode)
         self.prompt_pack: PromptPackSchema | None = None
         self.trader_context: str | None = None
         self.loop_count = 0
@@ -69,6 +80,12 @@ class TradingWorker:
             "DOTUSDT", "UNIUSDT", "DOGEUSDT", "SOLUSDT", 
             "ADAUSDT", "MATICUSDT", "AVAXUSDT"
         ]
+        # AI call hardening state (anti-429 / token control)
+        self._ai_round_robin_index = 0
+        self._ai_last_call_at: datetime | None = None
+        self._ai_rate_limit_streak = 0
+        self._ai_global_cooldown_until: datetime | None = None
+        self._ai_symbol_cooldown_until: dict[str, datetime] = {}
 
     async def initialize(self) -> None:
         """Initialize worker"""
@@ -91,9 +108,9 @@ class TradingWorker:
         async with AsyncSessionFactory() as session:
             # 1. Load Risk Config
             result = await session.execute(
-                select(BotConfig).where(BotConfig.is_active == True).order_by(BotConfig.id.desc())
+                select(BotConfig).where(BotConfig.is_active == True).order_by(BotConfig.id.desc()).limit(1)
             )
-            bot_config = result.scalar_one_or_none()
+            bot_config = result.scalars().first()
             
             if not bot_config:
                 logger.warning("no_active_bot_config_using_default")
@@ -141,16 +158,108 @@ class TradingWorker:
                 }
             )
             
-            # Initialize LLM Adapter
-            llm_provider = settings.selected_llm # 'openai' or 'claude'
-            llm = get_llm_adapter(
-                provider=settings.selected_llm,
-                api_key=settings.openai_api_key if settings.selected_llm in ('openai', 'groq') else settings.anthropic_api_key,
-                model=settings.openai_model if settings.selected_llm in ('openai', 'groq') else settings.anthropic_model
-            )
+            # Initialize LLM Adapters
+            ai_mode = settings.worker_ai_mode or "two_tier_hybrid"
             
-            self.orchestrator = AIOrchestrator(llm)
-            logger.info("ai_orchestrator_linked", provider=llm_provider, model=llm.model)
+            if ai_mode == "two_tier_hybrid":
+                # 2-Tier Hybrid Mode: Scout (cloud) + Verifier (cloud)
+                def _get_api_key(provider: str) -> str | None:
+                    """Get correct API key based on provider type"""
+                    if provider == 'openai':
+                        return settings.openai_api_key
+                    elif provider == 'groq':
+                        return settings.groq_api_key
+                    elif provider in ('claude', 'anthropic'):
+                        return settings.anthropic_api_key
+                    return None
+                
+                self.scout_llm = get_llm_adapter(
+                    provider=settings.worker_ai_scout_provider,
+                    api_key=_get_api_key(settings.worker_ai_scout_provider),
+                    model=settings.worker_ai_scout_model
+                )
+                verifier_llm = get_llm_adapter(
+                    provider=settings.worker_ai_verifier_provider,
+                    api_key=_get_api_key(settings.worker_ai_verifier_provider),
+                    model=settings.worker_ai_verifier_model
+                )
+                self.scout = AIScout(self.scout_llm)
+                self.orchestrator = AIOrchestrator(verifier_llm)
+                logger.info(
+                    "ai_two_tier_hybrid_linked",
+                    scout_provider=settings.worker_ai_scout_provider,
+                    scout_model=settings.worker_ai_scout_model,
+                    verifier_provider=settings.worker_ai_verifier_provider,
+                    verifier_model=settings.worker_ai_verifier_model,
+                )
+            elif ai_mode == "two_tier_same":
+                # 2-Tier Same Mode: Scout (local) + Verifier (local)
+                local_provider = settings.selected_llm or "local"
+                local_model = settings.openai_model if local_provider in ('openai', 'groq') else settings.anthropic_model
+                
+                def _get_api_key_for_provider(provider: str) -> str | None:
+                    if provider == 'openai':
+                        return settings.openai_api_key
+                    elif provider == 'groq':
+                        return settings.groq_api_key
+                    elif provider in ('claude', 'anthropic'):
+                        return settings.anthropic_api_key
+                    return None
+                
+                api_key = _get_api_key_for_provider(local_provider)
+                self.scout_llm = get_llm_adapter(
+                    provider=local_provider,
+                    api_key=api_key,
+                    model=local_model
+                )
+                verifier_llm = get_llm_adapter(
+                    provider=local_provider,
+                    api_key=api_key,
+                    model=local_model
+                )
+                self.scout = AIScout(self.scout_llm)
+                self.orchestrator = AIOrchestrator(verifier_llm)
+                logger.info(
+                    "ai_two_tier_same_linked",
+                    provider=local_provider,
+                    model=local_model,
+                    mode="two_tier_same"
+                )
+            elif ai_mode == "single_tier":
+                # Single-Tier Mode: Use selected LLM for everything
+                llm_provider = settings.selected_llm
+                
+                def _get_single_tier_api_key(provider: str) -> str | None:
+                    if provider == 'openai':
+                        return settings.openai_api_key
+                    elif provider == 'groq':
+                        return settings.groq_api_key
+                    elif provider in ('claude', 'anthropic'):
+                        return settings.anthropic_api_key
+                    return None
+                
+                llm = get_llm_adapter(
+                    provider=settings.selected_llm,
+                    api_key=_get_single_tier_api_key(settings.selected_llm),
+                    model=settings.openai_model if settings.selected_llm in ('openai', 'groq') else settings.anthropic_model
+                )
+                self.orchestrator = AIOrchestrator(llm)
+                logger.info("ai_single_tier_linked", provider=llm_provider, model=llm.model)
+            else:
+                # Fallback to two_tier_hybrid
+                logger.warning("ai_mode_invalid", mode=ai_mode, fallback="two_tier_hybrid")
+                self.scout_llm = get_llm_adapter(
+                    provider=settings.worker_ai_scout_provider,
+                    api_key=settings.openai_api_key if settings.worker_ai_scout_provider in ('openai', 'groq') else settings.anthropic_api_key,
+                    model=settings.worker_ai_scout_model
+                )
+                verifier_llm = get_llm_adapter(
+                    provider=settings.worker_ai_verifier_provider,
+                    api_key=settings.openai_api_key if settings.worker_ai_verifier_provider in ('openai', 'groq') else settings.anthropic_api_key,
+                    model=settings.worker_ai_verifier_model
+                )
+                self.scout = AIScout(self.scout_llm)
+                self.orchestrator = AIOrchestrator(verifier_llm)
 
         logger.info("worker_initialized")
 
@@ -195,12 +304,24 @@ class TradingWorker:
         
         async with AsyncSessionFactory() as session:
             try:
+                # Local serializer helper (used by both proactive close and normal AI decisions)
+                import json as _json
+
+                def _serialize(obj):
+                    return _json.loads(
+                        _json.dumps(obj, default=lambda o: o.isoformat() if hasattr(o, 'isoformat') else str(o))
+                    )
+
                 # Reconcile exchange positions with database
                 await self.reconciler.sync_positions(session)
                 
                 # Get current positions from DB to share with AI
                 positions_result = await session.execute(select(Position))
                 db_positions = {p.symbol: p for p in positions_result.scalars().all()}
+
+                # Build AI budget for this loop (prioritize open positions, then round-robin others)
+                ai_symbols_this_loop = self._build_ai_symbol_plan(symbols, db_positions)
+                ai_symbols_set = set(ai_symbols_this_loop)
 
                 for symbol in symbols:
                     trace_id = str(uuid.uuid4())
@@ -251,12 +372,12 @@ class TradingWorker:
                         
                         # Fallback to system risk limits if trader didn't specify SL
                         # This prevents the AI from exiting too early or staying too long without a plan
-                        if max_loss_usd is None and self.risk_engine.config.get("max_risk_per_trade_pct"):
+                        if max_loss_usd is None and self.risk_engine.config.max_risk_per_trade_pct:
                             # Estimate dollar loss based on account balance and risk %
                             try:
                                 balance_info = await self.exchange.get_account_balance() if self.is_binance else await self.exchange.get_balance()
                                 balance = float(balance_info[0]["balance"]) if self.is_binance and isinstance(balance_info, list) else float(balance_info.get("balance", 0))
-                                risk_pct = self.risk_engine.config["max_risk_per_trade_pct"] / 100.0
+                                risk_pct = self.risk_engine.config.max_risk_per_trade_pct / 100.0
                                 max_loss_usd = balance * risk_pct
                             except:
                                 pass
@@ -299,7 +420,6 @@ class TradingWorker:
 
                         # Check max hold time (from trader's own prompt)
                         if not should_close and max_hold_mins is not None and active_pos.opened_at:
-                            from datetime import timedelta
                             hold_time = (datetime.utcnow() - active_pos.opened_at).total_seconds() / 60
                             if hold_time >= max_hold_mins:
                                 should_close = True
@@ -315,6 +435,8 @@ class TradingWorker:
                                 reason=close_reason
                             )
                             close_side = Side.SHORT if pos_side == "long" else Side.LONG
+                            # Create unique trace_id for this proactive close (avoid duplicates)
+                            exit_trace_id = f"{trace_id}_close_{symbol}"
                             exit_decision = DecisionSchema(
                                 regime=MarketRegime.RANGE,
                                 action=ActionType.CLOSE,
@@ -330,7 +452,7 @@ class TradingWorker:
                             # Create Decision record for proactive closure
                             exit_decision_model = DecisionModel(
                                 timestamp=datetime.utcnow(),
-                                trace_id=trace_id,
+                                trace_id=exit_trace_id,
                                 decision_json=_serialize(exit_decision.model_dump()),
                                 confidence=1.0,
                                 regime=MarketRegime.RANGE.value,
@@ -344,7 +466,7 @@ class TradingWorker:
                             try:
                                 close_result = await self.execution_engine.execute_decision(
                                     decision=exit_decision,
-                                    trace_id=trace_id,
+                                    trace_id=exit_trace_id,
                                     session=session
                                 )
                                 if close_result.get("status") == "success":
@@ -359,7 +481,7 @@ class TradingWorker:
                                         level="INFO",
                                         code="AUTO_CLOSE_TP",
                                         message=f"[AUTO-CLOSE] {symbol}: {close_reason} | PnL: ${current_pnl:+.2f}",
-                                        trace_id=trace_id,
+                                        trace_id=exit_trace_id,
                                         data_json={"symbol": symbol, "pnl": current_pnl, "reason": close_reason}
                                     )
                                     session.add(close_event)
@@ -372,7 +494,83 @@ class TradingWorker:
                                 exit_decision_model.status = "FAILED"
                                 exit_decision_model.execution_error = str(close_err)
 
-                    # Step 2: Get real AI decision from Orchestrator
+                    # AI budgeting / cooldown gate (we still run proactive TP/SL above for all symbols)
+                    if symbol not in ai_symbols_set:
+                        continue
+
+                    now_utc = datetime.utcnow()
+                    if self._ai_global_cooldown_until and now_utc < self._ai_global_cooldown_until:
+                        continue
+
+                    symbol_cd = self._ai_symbol_cooldown_until.get(symbol)
+                    if symbol_cd and now_utc < symbol_cd:
+                        continue
+
+                    # === OPTIONAL: 2-tier Scout → Verifier Cascade ===
+                    # If enabled, scout scans symbol cheaply first. Only proceed to expensive verifier if signal strong.
+                    should_analyze_with_verifier = True
+                    if settings.worker_ai_use_two_tier and self.scout:
+                        try:
+                            # Build minimal context for scout
+                            has_position = symbol in db_positions
+                            current_pnl = None
+                            if has_position:
+                                p = db_positions[symbol]
+                                current_pnl = float(p.unrealized_pnl) if p.unrealized_pnl else 0.0
+                            
+                            scout_market_snapshot = {
+                                "symbol": symbol,
+                                "close": snapshot.close,
+                                "volume": snapshot.volume or 0,
+                                "spread": snapshot.spread or (snapshot.high - snapshot.low) if snapshot.high and snapshot.low else 0,
+                                "high": snapshot.high,
+                                "low": snapshot.low,
+                            }
+                            
+                            await self._respect_ai_pacing()
+                            scout_signal = await self.scout.scan_symbol(
+                                symbol=symbol,
+                                market_snapshot=scout_market_snapshot,
+                                has_open_position=has_position,
+                                current_pnl=current_pnl
+                            )
+                            
+                            if scout_signal:
+                                threshold = settings.worker_ai_scout_confidence_threshold
+                                # Always analyze if: has position OR high confidence signal
+                                if has_position or scout_signal.confidence >= threshold or scout_signal.priority_score >= 7:
+                                    logger.info(
+                                        "scout_signal_strong",
+                                        symbol=symbol,
+                                        confidence=scout_signal.confidence,
+                                        action_hint=scout_signal.action_hint,
+                                        priority=scout_signal.priority_score,
+                                        has_position=has_position
+                                    )
+                                    should_analyze_with_verifier = True
+                                else:
+                                    # Weak signal, no position → skip verifier to save tokens
+                                    logger.info(
+                                        "scout_filtered_low_priority",
+                                        symbol=symbol,
+                                        confidence=scout_signal.confidence,
+                                        action_hint=scout_signal.action_hint,
+                                        priority=scout_signal.priority_score
+                                    )
+                                    should_analyze_with_verifier = False
+                            else:
+                                # Scout failed → fallback to verifier (safety)
+                                logger.warning(f"scout_failed_fallback_verifier symbol={symbol}")
+                                should_analyze_with_verifier = True
+                                
+                        except Exception as scout_err:
+                            logger.error(f"scout_error symbol={symbol}: {scout_err}", exc_info=True)
+                            should_analyze_with_verifier = True  # Fallback to verifier on error
+                    
+                    if not should_analyze_with_verifier:
+                        continue  # Skip expensive verifier call
+
+                    # Step 2: Get real AI decision from Orchestrator (Verifier in 2-tier mode)
                     # Build ENRICHED position data for AI (includes entry_price, tp, sl, pnl%)
                     current_positions_list = []
                     for p in db_positions.values():
@@ -394,11 +592,12 @@ class TradingWorker:
                     
                     # Convert MarketSnapshot to dict for AI
                     # Serialize datetimes to strings to avoid DB JSON serialization error
-                    import json as _json
                     _raw = snapshot.model_dump()
                     snapshot_dict = _json.loads(
                         _json.dumps(_raw, default=lambda o: o.isoformat() if hasattr(o, 'isoformat') else str(o))
                     )
+
+                    await self._respect_ai_pacing()
                     
                     # Call Real AI Orchestrator
                     result = await self.orchestrator.make_decision(
@@ -409,8 +608,25 @@ class TradingWorker:
                     )
                     
                     if not result["valid"]:
-                        logger.error(f"AI Decision failed for {symbol}: {result['errors']}")
+                        error_text = self._extract_error_text(result)
+                        if self._is_rate_limited(error_text):
+                            self._on_rate_limited(symbol, error_text)
+                            logger.warning(
+                                "ai_rate_limited",
+                                symbol=symbol,
+                                cooldown_until=self._ai_global_cooldown_until.isoformat() if self._ai_global_cooldown_until else None,
+                                detail=error_text[:220],
+                            )
+                        else:
+                            # Reset streak on non-rate-limit validation errors
+                            self._ai_rate_limit_streak = 0
+                            logger.error(f"AI Decision failed for {symbol}: {result['errors']}")
                         continue
+
+                    # Successful model response resets rate-limit streak
+                    self._ai_rate_limit_streak = 0
+                    if symbol in self._ai_symbol_cooldown_until:
+                        self._ai_symbol_cooldown_until.pop(symbol, None)
                     
                     ai_decision = result["decision"] # This is AIDecisionOutput
                     
@@ -458,11 +674,6 @@ class TradingWorker:
                     )
 
                     # Step 3: Save decision to database
-                    # Serialize to avoid datetime JSON serialization errors
-                    def _serialize(obj):
-                        return _json.loads(
-                            _json.dumps(obj, default=lambda o: o.isoformat() if hasattr(o, 'isoformat') else str(o))
-                        )
                     decision_record = DecisionModel(
                         timestamp=datetime.utcnow(),
                         trace_id=trace_id,
@@ -474,6 +685,7 @@ class TradingWorker:
                         market_snapshot=snapshot_dict,
                         checklist_results=_serialize([c.model_dump() for c in ai_decision.checklist_results]),
                         status="PENDING",
+                        tokens_used=result.get("tokens_used", 0),
                     )
                     session.add(decision_record)
                     await session.flush()
@@ -482,10 +694,13 @@ class TradingWorker:
                         # Fetch balance and current positions for risk validation
                         balance_info = await self.exchange.get_account_balance() if self.is_binance else await self.exchange.get_balance()
                         balance = float(balance_info[0]["balance"]) if self.is_binance and isinstance(balance_info, list) else float(balance_info.get("balance", 0))
-                        
+
+                        # Refresh positions from DB to avoid stale in-memory map
+                        latest_positions_result = await session.execute(select(Position))
+                        latest_positions = latest_positions_result.scalars().all()
                         current_positions = [
                             {"symbol": p.symbol, "side": p.side, "qty": p.qty}
-                            for p in db_positions.values()
+                            for p in latest_positions
                         ]
 
                         # Risk Validation
@@ -532,6 +747,107 @@ class TradingWorker:
             except Exception as e:
                 logger.error("worker_loop_iteration_error", error=str(e), exc_info=True)
                 await session.rollback()
+
+    def _build_ai_symbol_plan(self, symbols: list[str], db_positions: dict[str, Position]) -> list[str]:
+        """Build symbol list for full AI analysis in this loop.
+
+        Strategy:
+        - Always prioritize symbols with open positions (for risk-aware exits)
+        - Limit total AI calls per loop to control tokens/rate-limit
+        - Rotate remaining symbols in round-robin for fairness
+        """
+        max_symbols = max(1, settings.worker_ai_max_symbols_per_loop)
+
+        open_symbols = [s for s in symbols if s in db_positions]
+        selected: list[str] = []
+
+        if settings.worker_ai_prioritize_open_positions:
+            selected.extend(open_symbols)
+
+        remaining = [s for s in symbols if s not in selected]
+
+        # Round-robin rotation for fairness across loops
+        if remaining:
+            start = self._ai_round_robin_index % len(remaining)
+            rotated = remaining[start:] + remaining[:start]
+            self._ai_round_robin_index = (self._ai_round_robin_index + 1) % len(remaining)
+        else:
+            rotated = []
+
+        slots = max_symbols - len(selected)
+        if slots > 0:
+            selected.extend(rotated[:slots])
+
+        # If all slots were consumed by open positions, still keep those positions
+        # (we prefer safe exits over strict budget)
+        return selected
+
+    async def _respect_ai_pacing(self) -> None:
+        """Apply minimum interval between AI calls to smooth request bursts."""
+        min_interval_sec = max(0.0, settings.worker_ai_min_interval_ms / 1000.0)
+        if min_interval_sec <= 0:
+            return
+
+        now = datetime.utcnow()
+        if self._ai_last_call_at is None:
+            self._ai_last_call_at = now
+            return
+
+        elapsed = (now - self._ai_last_call_at).total_seconds()
+        if elapsed < min_interval_sec:
+            await asyncio.sleep(min_interval_sec - elapsed)
+
+        self._ai_last_call_at = datetime.utcnow()
+
+    def _extract_error_text(self, result: dict) -> str:
+        """Flatten orchestrator error payload to a single lowercase string."""
+        errors = result.get("errors") if isinstance(result, dict) else None
+        if not errors:
+            return ""
+        try:
+            if isinstance(errors, list):
+                parts = []
+                for e in errors:
+                    if isinstance(e, dict):
+                        parts.append(str(e.get("error") or e))
+                    else:
+                        parts.append(str(e))
+                return " | ".join(parts).lower()
+            return str(errors).lower()
+        except Exception:
+            return str(errors).lower()
+
+    def _is_rate_limited(self, error_text: str) -> bool:
+        """Detect rate limit responses across providers."""
+        msg = (error_text or "").lower()
+        return (
+            "429" in msg
+            or "rate limit" in msg
+            or "rate_limit" in msg
+            or "too many requests" in msg
+            or "tokens per minute" in msg
+        )
+
+    def _on_rate_limited(self, symbol: str, error_text: str) -> None:
+        """Apply adaptive cooldown on 429 to reduce burn and stabilize worker."""
+        self._ai_rate_limit_streak += 1
+        base = max(0.1, float(settings.worker_ai_backoff_base_sec))
+        cap = max(base, float(settings.worker_ai_backoff_max_sec))
+        # Exponential backoff with cap
+        delay = min(cap, base * (2 ** max(0, self._ai_rate_limit_streak - 1)))
+
+        now = datetime.utcnow()
+        cooldown_until = now + timedelta(seconds=delay)
+        self._ai_global_cooldown_until = cooldown_until
+        self._ai_symbol_cooldown_until[symbol] = cooldown_until
+
+        logger.warning(
+            "ai_backoff_applied",
+            symbol=symbol,
+            streak=self._ai_rate_limit_streak,
+            delay_sec=round(delay, 2),
+            reason=(error_text or "")[:220],
+        )
 
     async def _update_positions_pnl(self, snapshot: MarketSnapshot) -> None:
         """Legacy method - now integrated into the main loop for efficiency"""

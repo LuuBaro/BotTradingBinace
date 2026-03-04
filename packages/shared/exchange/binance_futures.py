@@ -32,12 +32,14 @@ class BinanceFuturesClient:
             self.base_url = "https://fapi.binance.com"
         
         self.session: Optional[aiohttp.ClientSession] = None
-        self.server_time_offset = 0  # Local - Server time diff
+        # Start with manual offset if configured (for system clock drift fixes)
+        self.server_time_offset = getattr(settings, 'binance_timestamp_offset', 0) or 0
         
         logger.info(
             "binance_client_initialized",
             testnet=settings.binance_testnet,
             base_url=self.base_url,
+            initial_offset_ms=self.server_time_offset,
         )
 
     async def __aenter__(self):
@@ -71,13 +73,25 @@ class BinanceFuturesClient:
                 local=local_ts,
                 server=server_ts,
             )
+            
+            # ⚠️ Warn if offset is too large (> 5 seconds)
+            if abs(self.server_time_offset) > 5000:
+                logger.warning(
+                    "server_time_offset_large",
+                    offset_ms=self.server_time_offset,
+                    message="System clock is significantly off. Consider syncing system time with w32tm /resync (Windows) or ntpdate (Linux)"
+                )
         except Exception as e:
             logger.error("server_time_sync_failed", error=str(e))
             self.server_time_offset = 0
 
     def _get_timestamp(self) -> int:
         """Get current timestamp adjusted for server time offset"""
-        return int(time.time() * 1000) + self.server_time_offset
+        # Always add offset to compensate for system time drift
+        # If offset is > 5s, this means system clock is significantly off
+        # but Binance will accept if timestamp (local + offset) is within 1000ms of server
+        ts = int(time.time() * 1000) + self.server_time_offset
+        return ts
 
     def _generate_signature(self, params: Dict[str, Any]) -> str:
         """Generate HMAC SHA256 signature for signed requests"""

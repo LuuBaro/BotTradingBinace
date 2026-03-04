@@ -16,14 +16,41 @@ import { SettingsPage } from './pages/SettingsPage'
 import { IntelPage } from './pages/IntelPage'
 
 function App() {
-  const { isAuthenticated } = useAuthStore()
+  const { isAuthenticated, clearToken } = useAuthStore()
   const [loading, setLoading] = useState(true)
+  const [tokenWarning, setTokenWarning] = useState(false)
 
   useEffect(() => {
-    // Check if token is still valid
     const token = localStorage.getItem('token')
     setLoading(false)
   }, [])
+
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      console.log('🔐 Token expired - auto logout triggered')
+      clearToken()
+      window.location.href = '/login'
+    }
+
+    window.addEventListener('auth:expired', handleAuthExpired)
+
+    const tokenExpirationTimer = setTimeout(() => {
+      setTokenWarning(true)
+      console.log('⏰ Token expiring in 5 minutes')
+    }, 86400000 - 300000)
+
+    const autoLogoutTimer = setTimeout(() => {
+      console.log('🔐 Token expired - auto logout triggered')
+      clearToken()
+      window.location.href = '/login'
+    }, 86400000)
+
+    return () => {
+      window.removeEventListener('auth:expired', handleAuthExpired)
+      clearTimeout(tokenExpirationTimer)
+      clearTimeout(autoLogoutTimer)
+    }
+  }, [clearToken])
 
   if (loading) {
     return (
@@ -39,6 +66,11 @@ function App() {
 
   return (
     <Router>
+      {tokenWarning && (
+        <div className="fixed top-0 left-0 right-0 bg-amber-500/20 border-b border-amber-500/50 text-amber-300 px-4 py-3 backdrop-blur text-center font-medium z-50">
+          ⏰ Your session expires in 5 minutes. Please save your work.
+        </div>
+      )}
       <Layout>
         <Routes>
           <Route path="/" element={<OverviewPage />} />

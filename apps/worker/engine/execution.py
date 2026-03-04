@@ -23,6 +23,7 @@ from packages.shared.trade_journal import ExitReason
 from packages.shared.exchange.mock import MockExchange
 from packages.shared.exchange.binance_futures import BinanceFuturesClient
 from packages.shared.logger import logger
+from packages.shared.worker_state import worker_state
 
 
 async def _commit_with_retry(session: AsyncSession, retries: int = 3, delay: float = 0.3) -> None:
@@ -137,6 +138,11 @@ class ExecutionEngine:
         Returns:
             Execution result dict
         """
+        # Check if worker is paused
+        if worker_state["is_paused"]:
+            logger.warning("execution_skipped_paused", trace_id=trace_id, reason=worker_state.get("pause_reason"))
+            return {"status": "skipped", "reason": "Bot is paused"}
+        
         # Handle HOLD action (no execution needed)
         if decision.action == ActionType.HOLD:
             logger.info("execution_skipped_hold", trace_id=trace_id)
@@ -601,7 +607,8 @@ class ExecutionEngine:
         client_order_id = f"CLOSE_{trace_id[:8]}_{decision.symbol}"
 
         # Place market order to close (opposite side, reduce-only)
-        close_side = Side.SHORT if position.side == Side.LONG.value else Side.LONG
+        # Fix: Use case-insensitive comparison (DB stores "LONG", enum is "long")
+        close_side = Side.SHORT if position.side.upper() == "LONG" else Side.LONG
         
         if self.is_binance:
             close_order = await self.exchange.place_order(
@@ -710,7 +717,7 @@ class ExecutionEngine:
                 "max_runup": 0.0,
             },
             decision_json=decision.model_dump(),
-            exit_reason=str(decision.decision_type.value) if hasattr(decision.decision_type, 'value') else str(decision.decision_type or ExitReason.MANUAL.value),
+            exit_reason=str(decision.action.value) if hasattr(decision, 'action') else ExitReason.MANUAL.value,
             closed_at=exit_time,
         )
         session.add(trade)
