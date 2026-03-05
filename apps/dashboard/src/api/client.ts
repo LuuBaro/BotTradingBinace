@@ -316,9 +316,27 @@ export class ApiClient {
 
 export const getApiBaseUrl = () => {
   const envUrl = (import.meta as any).env.VITE_API_BASE_URL
-  return envUrl && envUrl.trim().length > 0
-    ? envUrl
-    : 'http://localhost:8000/api/'
+  
+  // 1. Priority: Use explicit env var if set
+  if (envUrl && envUrl.trim().length > 0) {
+    console.log('✅ Using VITE_API_BASE_URL from environment:', envUrl)
+    return envUrl
+  }
+  
+  // 2. Auto-detect from current window location (for production)
+  // If running on domain, use same domain; if on localhost dev, use localhost:8000
+  const isDev = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  if (isDev && window.location.port === '5173') {
+    // Vite dev server with default port
+    console.log('✅ Dev mode detected: Using localhost:8000 via Vite proxy')
+    return 'http://localhost:8000/api/'
+  }
+  
+  // For any other case (production or custom dev setup), use current origin
+  const autoUrl = `${window.location.protocol}//${window.location.host}/api/`
+  console.warn(`⚠️  VITE_API_BASE_URL not set. Auto-detecting: ${autoUrl}`)
+  console.warn('💡 For explicit control, set VITE_API_BASE_URL env variable')
+  return autoUrl
 }
 
 export const createApiClient = (baseURL?: string, token?: string) => {
