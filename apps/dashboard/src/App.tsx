@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { useAuthStore } from './store'
 import { Layout } from './components/Layout'
 import { LoginPage } from './pages/LoginPage'
+import { SetupPage } from './pages/SetupPage'
 import { OverviewPage } from './pages/OverviewPage'
 import { PositionsPage } from './pages/PositionsPage'
 import { OrdersPage } from './pages/OrdersPage'
@@ -14,15 +15,29 @@ import { EventsPage } from './pages/EventsPage'
 import { LearningPage } from './pages/LearningPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { IntelPage } from './pages/IntelPage'
+import { createApiClient, getApiBaseUrl } from './api/client'
 
 function App() {
   const { isAuthenticated, clearToken } = useAuthStore()
   const [loading, setLoading] = useState(true)
+  const [setupComplete, setSetupComplete] = useState(false)
   const [tokenWarning, setTokenWarning] = useState(false)
 
   useEffect(() => {
-    const token = localStorage.getItem('token')
-    setLoading(false)
+    const checkSetupStatus = async () => {
+      try {
+        const api = createApiClient(getApiBaseUrl())
+        const response = await api.axiosInstance.get('auth/setup-status')
+        setSetupComplete(response.data.setup_complete)
+      } catch (err) {
+        console.error('Failed to check setup status:', err)
+        setSetupComplete(false)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    checkSetupStatus()
   }, [])
 
   useEffect(() => {
@@ -60,6 +75,12 @@ function App() {
     )
   }
 
+  // If setup is not complete, show SetupPage
+  if (!setupComplete) {
+    return <SetupPage />
+  }
+
+  // If setup is complete but not authenticated, show LoginPage
   if (!isAuthenticated) {
     return <LoginPage />
   }

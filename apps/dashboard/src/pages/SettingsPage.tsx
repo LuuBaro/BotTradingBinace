@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { createApiClient, getApiBaseUrl } from '../api/client'
-import { Globe, Plus, Trash2, Radio, MessageSquare, ExternalLink, Settings2, KeyRound, Bot, Database, Save, CheckCircle2, FlaskConical, Network, Zap, ArrowRight, Sparkles } from 'lucide-react'
+import { Globe, Plus, Trash2, Radio, MessageSquare, ExternalLink, Settings2, KeyRound, Bot, Database, Save, CheckCircle2, FlaskConical, Network, Zap, ArrowRight, Sparkles, Shield, Copy, Check } from 'lucide-react'
 
 interface SettingsResponse {
   settings: Record<string, any>
@@ -67,6 +67,17 @@ export const SettingsPage: React.FC = () => {
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [passwordMessage, setPasswordMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  
+  // 2FA Management State
+  const [twoFAEnabled, setTwoFAEnabled] = useState(false)
+  const [showTwoFASetup, setShowTwoFASetup] = useState(false)
+  const [twoFAPassword, setTwoFAPassword] = useState('')
+  const [twoFASecret, setTwoFASecret] = useState('')
+  const [twoFAQRCode, setTwoFAQRCode] = useState('')
+  const [twoFAVerificationCode, setTwoFAVerificationCode] = useState('')
+  const [twoFABackupCodes, setTwoFABackupCodes] = useState<string[]>([])
+  const [twoFAMessage, setTwoFAMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [copiedCode, setCopiedCode] = useState<string | null>(null)
   
   // Confirm Dialog State
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
@@ -175,6 +186,63 @@ export const SettingsPage: React.FC = () => {
     } catch (err: any) {
       setMessage({ type: 'error', text: `Telegram test failed: ${err.message || err}` })
     }
+  }
+
+  const handleSetupTwoFA = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setTwoFAMessage(null)
+    
+    if (!twoFAPassword.trim()) {
+      setTwoFAMessage({ type: 'error', text: 'Password is required to setup 2FA' })
+      return
+    }
+
+    try {
+      const user = JSON.parse(localStorage.getItem('user') || '{}')
+      
+      const response = await api.axiosInstance.post('auth/setup-totp', {
+        username: user.username,
+        password: twoFAPassword,
+      })
+
+      setTwoFASecret(response.data.secret)
+      setTwoFAQRCode(response.data.qr_code)
+      setTwoFAMessage({ type: 'success', text: 'QR code generated. Scan with Google Authenticator' })
+    } catch (err: any) {
+      setTwoFAMessage({ type: 'error', text: err.response?.data?.detail || 'Failed to setup 2FA' })
+    }
+  }
+
+  const handleVerifyTwoFA = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setTwoFAMessage(null)
+
+    if (!twoFAVerificationCode.trim() || twoFAVerificationCode.length !== 6) {
+      setTwoFAMessage({ type: 'error', text: 'Please enter a valid 6-digit code' })
+      return
+    }
+
+    try {
+      const user = JSON.parse(localStorage.getItem('user') || '{}')
+      
+      const response = await api.axiosInstance.post('auth/verify-totp-setup', {
+        username: user.username,
+        secret: twoFASecret,
+        code: twoFAVerificationCode,
+      })
+
+      setTwoFABackupCodes(response.data.backup_codes || [])
+      setTwoFAEnabled(true)
+      setTwoFAMessage({ type: 'success', text: '2FA enabled successfully!' })
+    } catch (err: any) {
+      setTwoFAMessage({ type: 'error', text: err.response?.data?.detail || 'Invalid verification code' })
+    }
+  }
+
+  const copyBackupCode = (code: string) => {
+    navigator.clipboard.writeText(code)
+    setCopiedCode(code)
+    setTimeout(() => setCopiedCode(null), 2000)
   }
 
   const handleChangePassword = async (e: React.FormEvent) => {
@@ -959,6 +1027,133 @@ export const SettingsPage: React.FC = () => {
                   Update Password
                 </button>
               </form>
+
+              {/* 2FA Setup Section */}
+              <div className="mt-6 pt-6 border-t border-slate-700">
+                <h3 className="text-sm font-bold text-slate-200 mb-4 flex items-center gap-2">
+                  <Shield size={16} className="text-blue-400" />
+                  Two-Factor Authentication (2FA)
+                </h3>
+
+                {twoFAMessage && (
+                  <div className={`p-3 rounded-lg border mb-4 text-sm ${
+                    twoFAMessage.type === 'success'
+                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                      : 'bg-red-500/10 border-red-500/30 text-red-400'
+                  }`}>
+                    {twoFAMessage.text}
+                  </div>
+                )}
+
+                {!showTwoFASetup && !twoFAEnabled && (
+                  <button
+                    onClick={() => setShowTwoFASetup(true)}
+                    className="btn btn-secondary w-full text-sm"
+                  >
+                    Enable 2FA with Google Authenticator
+                  </button>
+                )}
+
+                {showTwoFASetup && !twoFAQRCode && (
+                  <form onSubmit={handleSetupTwoFA} className="space-y-3">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">
+                        Confirm Password
+                      </label>
+                      <input
+                        type="password"
+                        placeholder="Enter your password to enable 2FA"
+                        className="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500/50 transition-colors"
+                        value={twoFAPassword}
+                        onChange={(e) => setTwoFAPassword(e.target.value)}
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={!twoFAPassword.trim()}
+                      className="btn btn-secondary w-full text-sm disabled:opacity-50"
+                    >
+                      Generate QR Code
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowTwoFASetup(false)
+                        setTwoFAPassword('')
+                      }}
+                      className="btn btn-ghost w-full text-sm"
+                    >
+                      Cancel
+                    </button>
+                  </form>
+                )}
+
+                {twoFAQRCode && !twoFAEnabled && (
+                  <div className="space-y-4">
+                    <div className="bg-black/60 p-4 rounded-lg text-center">
+                      <img src={twoFAQRCode} alt="2FA QR Code" className="w-48 h-48 mx-auto" />
+                      <p className="text-xs text-slate-400 mt-3">Scan this with Google Authenticator</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">
+                        Enter 6-Digit Code
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="000000"
+                        maxLength={6}
+                        className="w-full text-center text-2xl font-bold tracking-widest bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-blue-500/50 transition-colors"
+                        value={twoFAVerificationCode}
+                        onChange={(e) => setTwoFAVerificationCode(e.target.value.replace(/\\D/g, '').slice(0, 6))}
+                      />
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleVerifyTwoFA}
+                        disabled={twoFAVerificationCode.length !== 6}
+                        className="btn btn-primary flex-1 text-sm disabled:opacity-50"
+                      >
+                        Verify & Enable 2FA
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowTwoFASetup(false)
+                          setTwoFAPassword('')
+                          setTwoFASecret('')
+                          setTwoFAQRCode('')
+                          setTwoFAVerificationCode('')
+                        }}
+                        className="btn btn-ghost flex-1 text-sm"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {twoFAEnabled && twoFABackupCodes.length > 0 && (
+                  <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 space-y-3">
+                    <p className="text-sm text-blue-300 font-semibold">✅ 2FA is now enabled!</p>
+                    <p className="text-xs text-slate-300">Save these backup codes in a safe place. You can use them to access your account if you lose access to your authenticator.</p>
+                    <div className="space-y-2 max-h-40 overflow-y-auto">
+                      {twoFABackupCodes.map((code, idx) => (
+                        <div key={idx} className="flex items-center justify-between px-3 py-2 bg-black/40 rounded text-xs font-mono">
+                          <span className="text-slate-400">{code}</span>
+                          <button
+                            onClick={() => copyBackupCode(code)}
+                            className="text-slate-500 hover:text-blue-400 transition"
+                          >
+                            {copiedCode === code ? <Check size={14} /> : <Copy size={14} />}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 

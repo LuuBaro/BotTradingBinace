@@ -42,6 +42,12 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class SetupRequest(BaseModel):
+    username: str
+    password: str
+    email: str
+
+
 class GoogleLoginRequest(BaseModel):
     id_token: str
 
@@ -133,14 +139,89 @@ class SettingsUpdate(BaseModel):
 
 # ===== Authentication Endpoints =====
 
+@router.post("/auth/setup", response_model=dict)
+async def setup(request: SetupRequest):
+    """First-time system setup - create admin user"""
+    try:
+        # Check if already setup
+        if user_manager.is_setup_complete():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="System is already configured. Contact admin to reset.",
+            )
+        
+        # Validate input
+        if not request.username or not request.password or not request.email:
+            raise HTTPException(
+                status_code=400,
+                detail="Username, password, and email are required",
+            )
+        
+        if len(request.password) < 8:
+            raise HTTPException(
+                status_code=400,
+                detail="Password must be at least 8 characters",
+            )
+        
+        if "@" not in request.email:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid email format",
+            )
+        
+        # Create first user
+        success, message = user_manager.create_first_user(
+            request.username,
+            request.password,
+            request.email
+        )
+        
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail=message,
+            )
+        
+        logger.info("system_setup_complete", username=request.username, email=request.email)
+        
+        return {
+            "success": True,
+            "message": "Admin user created. You can now login.",
+            "username": request.username,
+            "email": request.email,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("setup_error", error=str(e))
+        raise HTTPException(status_code=500, detail="Setup failed")
+
+
+@router.get("/auth/setup-status", response_model=dict)
+async def setup_status():
+    """Check if system setup is complete"""
+    return {
+        "setup_complete": user_manager.is_setup_complete(),
+    }
+
+
 @router.post("/auth/login", response_model=dict)
 async def login(request: LoginRequest):
     """Login and get JWT token"""
     try:
-        if not user_manager.verify_password(request.username, request.password):
+        # Check if setup is complete
+        if not user_manager.is_setup_complete():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="System setup required. Please access /setup",
+            )
+        
+        # Verify password with rate limiting
+        success, message = user_manager.verify_password(request.username, request.password)
+        if not success:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials",
+                detail=message,
             )
 
         user = user_manager.get_user(request.username)
@@ -161,6 +242,7 @@ async def login(request: LoginRequest):
                 "user": {
                     "id": user.id,
                     "username": user.username,
+                    "email": user.email,
                     "role": user.role,
                 },
             }

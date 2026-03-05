@@ -9,6 +9,7 @@ from google.auth.transport import requests
 from google.oauth2 import id_token
 import pyotp
 import qrcode
+import bcrypt
 from io import BytesIO
 import base64
 import secrets
@@ -169,41 +170,131 @@ class JWTHandler:
 
 
 class DemoUserManager:
-    """Demo user database (for testing)"""
+    """User database with security: password hashing, rate limiting, setup system"""
+
+    MAX_LOGIN_ATTEMPTS = 5
+    LOCKOUT_DURATION_MINUTES = 180  # 3 hours
 
     def __init__(self):
-        # System lock - only allow 1 user to setup 2FA on first initialization
+        # Setup system - only allow first-time setup
+        self.setup_complete = False
         self.system_2fa_locked = False
         
-        self.users = {
-            "admin": {
-                "password": "admin",
-                "id": "user_admin_001",
-                "email": "admin@trading.bot",
-                "role": "admin",
-                "totp_secret": None,
-                "totp_enabled": False,
-                "backup_codes": [],
-            },
-            "trader": {
-                "password": "trader",
-                "id": "user_trader_001",
-                "email": "trader@trading.bot",
-                "role": "trader",
-                "totp_secret": None,
-                "totp_enabled": False,
-                "backup_codes": [],
-            },
-            "viewer": {
-                "password": "viewer",
-                "id": "user_viewer_001",
-                "email": "viewer@trading.bot",
-                "role": "viewer",
-                "totp_secret": None,
-                "totp_enabled": False,
-                "backup_codes": [],
-            },
+        # Empty users - populated via first-time setup
+        self.users: Dict[str, Dict[str, Any]] = {}
+        
+        # Track failed login attempts: {username: {attempts: int, locked_until: datetime}}
+        self.failed_attempts: Dict[str, Dict[str, Any]] = {}
+
+    def hash_password(self, password: str) -> str:
+        """Hash password using bcrypt"""
+        return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+    def verify_password(self, username: str, password: str) -> tuple[bool, str]:
+        """
+        Verify user credentials with rate limiting
+        Returns: (success: bool, message: str)
+        """
+        user_data = self.users.get(username)
+        if not user_data:
+            self._record_failed_attempt(username)
+            return False, "User not found"
+
+        # Check if account is locked
+        is_locked, unlock_time = self._is_account_locked(username)
+        if is_locked:
+            minutes_left = int((unlock_time - datetime.now(timezone.utc)).total_seconds() / 60)
+            logger.warning("login_attempt_locked", username=username, minutes_left=minutes_left)
+            return False, f"Account locked. Try again in {minutes_left} minutes"
+
+        # Verify password hash
+        try:
+            password_hash = user_data.get("password_hash")
+            if not password_hash:
+                return False, "Invalid credentials"
+            
+            if not bcrypt.checkpw(password.encode(), password_hash.encode()):
+                self._record_failed_attempt(username)
+                attempts_left = self.MAX_LOGIN_ATTEMPTS - (self.failed_attempts.get(username, {}).get("attempts", 0))
+                logger.warning("login_failed", username=username, attempts_left=attempts_left)
+                return False, f"Invalid password. {attempts_left} attempts remaining"
+            
+            # Clear failed attempts on successful login
+            if username in self.failed_attempts:
+                del self.failed_attempts[username]
+            
+            logger.info("login_success", username=username)
+            return True, "Login successful"
+        except Exception as e:
+            logger.error("password_verification_error", error=str(e))
+            return False, "Authentication error"
+
+    def _record_failed_attempt(self, username: str):
+        """Track failed login attempt"""
+        if username not in self.failed_attempts:
+            self.failed_attempts[username] = {"attempts": 0, "locked_until": None}
+        
+        self.failed_attempts[username]["attempts"] += 1
+        
+        # Lock account if max attempts reached
+        if self.failed_attempts[username]["attempts"] >= self.MAX_LOGIN_ATTEMPTS:
+            lockout_until = datetime.now(timezone.utc) + timedelta(minutes=self.LOCKOUT_DURATION_MINUTES)
+            self.failed_attempts[username]["locked_until"] = lockout_until
+            logger.warning("account_locked_max_attempts", username=username)
+
+    def _is_account_locked(self, username: str) -> tuple[bool, Optional[datetime]]:
+        """Check if account is locked"""
+        if username not in self.failed_attempts:
+            return False, None
+        
+        locked_until = self.failed_attempts[username].get("locked_until")
+        if not locked_until:
+            return False, None
+        
+        # Check if lockout period has expired
+        if datetime.now(timezone.utc) > locked_until:
+            # Unlock account
+            del self.failed_attempts[username]
+            return False, None
+        
+        return True, locked_until
+
+    def create_first_user(self, username: str, password: str, email: str) -> tuple[bool, str]:
+        """Create first admin user during setup"""
+        if self.setup_complete:
+            return False, "Setup already completed"
+        
+        if not username or not password or not email:
+            return False, "Username, password, and email are required"
+        
+        if len(password) < 8:
+            return False, "Password must be at least 8 characters"
+        
+        if username in self.users:
+            return False, "Username already exists"
+        
+        # Create the first user
+        password_hash = self.hash_password(password)
+        self.users[username] = {
+            "password_hash": password_hash,
+            "id": f"user_{username}_{secrets.token_hex(4)}",
+            "email": email,
+            "role": "admin",  # First user is always admin
+            "totp_secret": None,
+            "totp_enabled": False,
+            "backup_codes": [],
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        
+        # Mark setup as complete
+        self.setup_complete = True
+        
+        logger.info("first_user_created", username=username, email=email)
+        return True, "Admin user created successfully"
+
+    def is_setup_complete(self) -> bool:
+        """Check if first-time setup is complete"""
+        return self.setup_complete
 
     def get_user(self, username: str) -> Optional[User]:
         """Get user by username"""
@@ -218,42 +309,42 @@ class DemoUserManager:
             role=user_data["role"],
         )
 
-    def verify_password(self, username: str, password: str) -> bool:
-        """Verify user credentials"""
-        user_data = self.users.get(username)
-        if not user_data:
-            return False
-
-        # Demo: plain text comparison (use proper hashing in production)
-        return user_data["password"] == password
-
-    def change_password(self, username: str, new_password: str) -> bool:
+    def change_password(self, username: str, old_password: str, new_password: str) -> bool:
         """Change user password"""
         if username not in self.users:
             return False
         
-        if len(new_password) < 4:
+        if len(new_password) < 8:
             return False
         
-        self.users[username]["password"] = new_password
+        # Verify old password
+        success, _ = self.verify_password(username, old_password)
+        if not success:
+            return False
+        
+        # Hash and store new password
+        password_hash = self.hash_password(new_password)
+        self.users[username]["password_hash"] = password_hash
         logger.info("password_changed", username=username)
         return True
 
     def reset_password(self, username: str) -> Optional[str]:
-        """Reset password to default (username)"""
+        """Reset password to temporary one (admin only)"""
         if username not in self.users:
             return None
         
-        # Reset to username as default (or generate temp password)
-        temp_password = username
-        self.users[username]["password"] = temp_password
-        logger.info("password_reset", username=username)
+        # Generate temp password
+        temp_password = secrets.token_urlsafe(12)
+        password_hash = self.hash_password(temp_password)
+        self.users[username]["password_hash"] = password_hash
+        
+        logger.info("password_reset_admin", username=username)
         return temp_password
 
     def get_or_create_user(self, email: str, name: str, google_id: str) -> User:
         """Get or create user from Google OAuth"""
         # Use email as username for Google users
-        username = email.split('@')[0]  # Extract username from email
+        username = email.split('@')[0]
         
         # If user already exists, return it
         if username in self.users:
@@ -265,32 +356,28 @@ class DemoUserManager:
                 role=user_data["role"],
             )
         
-        # Create new user from Google
+        # Create new user from Google OAuth
         user_id = f"user_google_{google_id[:10]}"
         self.users[username] = {
-            "password": None,  # No password for OAuth users
+            "password_hash": None,
             "id": user_id,
             "email": email,
-            "role": "admin",  # Auto-admin for first Google user (personal bot)
+            "role": "admin" if not self.users else "trader",
             "oauth_provider": "google",
             "oauth_id": google_id,
             "totp_secret": None,
             "totp_enabled": False,
             "backup_codes": [],
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         
-        logger.info(
-            "user_created_from_google",
-            username=username,
-            email=email,
-            role="admin"
-        )
+        logger.info("user_created_from_google", username=username, email=email)
         
         return User(
             id=user_id,
             username=username,
             email=email,
-            role="admin",
+            role=self.users[username]["role"],
         )
 
     def setup_totp(self, username: str, secret: str, backup_codes: list[dict]) -> bool:
@@ -301,8 +388,6 @@ class DemoUserManager:
         self.users[username]["totp_secret"] = secret
         self.users[username]["totp_enabled"] = True
         self.users[username]["backup_codes"] = backup_codes
-        
-        # Lock system for future 2FA setups (only 1 user can setup)
         self.system_2fa_locked = True
         
         logger.info("totp_setup_completed", username=username)
@@ -310,15 +395,11 @@ class DemoUserManager:
 
     def is_2fa_setup_allowed(self, username: str) -> bool:
         """Check if 2FA setup is allowed for this user"""
-        # Allow if system not locked, or if user already has 2FA enabled
         if self.system_2fa_locked:
             user_data = self.users.get(username)
             if user_data and user_data.get("totp_enabled"):
-                # User already has 2FA, allow to update
                 return True
-            # System locked and user doesn't have 2FA
             return False
-        # System not locked, allow setup
         return True
 
     def verify_backup_code(self, username: str, code: str) -> bool:

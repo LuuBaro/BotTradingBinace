@@ -43,17 +43,23 @@ export const LoginPage: React.FC = () => {
         password: password.trim(),
       })
 
-      if (response.data.totp_enabled === false) {
-        // First time - need to setup 2FA
-        setTempUsername(username.trim())
-        await initializeTotp(username.trim(), password.trim())
-      } else if (response.data.totp_enabled === true && !code2fa) {
-        // Already has 2FA - need code
+      if (response.data.totp_enabled === true && !code2fa) {
+        // Already has 2FA enabled - need code
         setTempUsername(username.trim())
         setError('Hãy nhập mã 6 chữ số từ Google Authenticator')
-      } else if (code2fa) {
+      } else if (response.data.totp_enabled === true && code2fa) {
         // Has 2FA code - verify it
         await verify2FA(username.trim())
+      } else if (response.data.totp_enabled === false && response.data.access_token) {
+        // First login - no 2FA yet, login successful
+        setToken(response.data.access_token)
+        setUser({
+          id: response.data.user.id,
+          username: response.data.user.username,
+          email: response.data.user.email,
+          role: response.data.user.role,
+        })
+        window.location.href = '/'
       }
     } catch (err: any) {
       console.error('Login error:', err)
