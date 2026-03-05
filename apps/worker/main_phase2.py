@@ -330,8 +330,11 @@ async def main():
         logger.info("signal_received", signal=sig)
         asyncio.create_task(worker.shutdown())
 
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
+    # Register signal handlers (skip on Windows where it's not supported)
+    import sys
+    if sys.platform != "win32":
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
 
     try:
         await worker.initialize()

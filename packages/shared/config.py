@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     # API Server
     api_host: str = Field(default="0.0.0.0", description="API server host")
-    api_port: int = Field(default=8001, description="API server port")
+    api_port: int = Field(default=8000, description="API server port")
 
     # Worker
     worker_loop_interval_sec: int = Field(
@@ -151,6 +151,22 @@ class Settings(BaseSettings):
 
     # Google OAuth
     google_client_id: str | None = Field(default=None, description="Google OAuth2 Client ID")
+
+    # Auth / Branding
+    app_name: str = Field(default="TiznDBot", description="Application display name")
+    frontend_base_url: str = Field(
+        default="http://localhost:3000",
+        description="Frontend base URL for auth-related links and messaging",
+    )
+
+    # Email / SMTP (for OTP + password reset)
+    smtp_enabled: bool = Field(default=False, description="Enable SMTP email sending")
+    smtp_host: str | None = Field(default=None, description="SMTP host")
+    smtp_port: int = Field(default=587, description="SMTP port")
+    smtp_username: str | None = Field(default=None, description="SMTP username")
+    smtp_password: str | None = Field(default=None, description="SMTP password")
+    smtp_from_email: str | None = Field(default=None, description="Sender email address")
+    smtp_use_tls: bool = Field(default=True, description="Use STARTTLS for SMTP")
 
     @property
     def is_demo(self) -> bool:

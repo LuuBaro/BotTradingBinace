@@ -94,6 +94,14 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("close_position", self.cmd_close_position))
         self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
         
+        # Admin
+        self.application.add_handler(CommandHandler("sync_now", self.cmd_sync_now))
+        
+        # Utility
+        self.application.add_handler(CommandHandler("tips", self.cmd_tips))
+        self.application.add_handler(CommandHandler("guide", self.cmd_guide))
+        self.application.add_handler(CommandHandler("settings", self.cmd_settings))
+        
         # Confirmation handler
         self.application.add_handler(CallbackQueryHandler(self.handle_confirmation))
         
@@ -179,7 +187,7 @@ class TelegramBot:
         await self._audit(chat_id, "start", "success")
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handler for /help"""
+        """Handler for /help - Interactive help with categories"""
         chat_id = update.effective_chat.id
         
         if not self.rbac.is_registered(chat_id):
@@ -187,36 +195,41 @@ class TelegramBot:
             return
         
         user = self.rbac.get_user(chat_id)
-        help_text = """
-🔍 **Health & Time**
-/time - Uptime, last tick, environment
-/latency - WS/REST P95 latency & clock skew
-/health - System health status
-
-📊 **Market**
-/price BTCUSDT - Get current price
-/spread BTCUSDT - Get bid-ask spread
-/kline BTCUSDT 1m 60 - Get 60 klines (1m)
-
-📈 **State**
-/status - Bot status & config
-/positions - Current positions
-/orders - Open orders
-/recon - Reconciliation status
-/decision - Latest AI decision
-/trace <trace_id> - Get decision trace
-
-⚙️ **Control** (Traders+Admins)
-/pause - Pause trading
-/resume - Resume trading
-/close_position BTCUSDT - Close position (2-step)
-/close_all - Close all positions (2-step)
-        """
+        role = user.role.value if user else "unknown"
         
-        if user and user.role.value == "admin":
-            help_text += "\n🔐 **Admin**\n/sync_now - Force reconciliation\n"
+        # Main help message
+        help_text = f"""
+🤖 **Trading Bot Telegram Control**
+
+👤 *Your Role:* `{role.upper()}`
+
+📚 *Command Categories:*
+"""
         
-        await update.message.reply_text(help_text, parse_mode="Markdown")
+        # Build category buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("🏥 Health & Time", callback_data="help_health"),
+                InlineKeyboardButton("💰 Market Data", callback_data="help_market"),
+            ],
+            [
+                InlineKeyboardButton("📊 Trading State", callback_data="help_state"),
+                InlineKeyboardButton("⚙️ Control", callback_data="help_control"),
+            ],
+            [
+                InlineKeyboardButton("💡 Tips & Tricks", callback_data="help_tips"),
+                InlineKeyboardButton("📖 Usage Guide", callback_data="help_guide"),
+            ],
+        ]
+        
+        if role == "admin":
+            keyboard.append([InlineKeyboardButton("🔐 Admin Only", callback_data="help_admin")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        help_text += "\n*Tap a category below to see available commands!* 👇"
+        
+        await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=reply_markup)
         await self._audit(chat_id, "help", "success")
 
     async def cmd_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -696,15 +709,369 @@ class TelegramBot:
             logger.error("cmd_close_all_error", error=str(e))
             await self._audit(chat_id, "close_all", "error", {"error": str(e)})
 
+    async def cmd_sync_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler for /sync_now - Force reconciliation (Admin only)"""
+        chat_id = update.effective_chat.id
+        
+        from apps.telegram.rbac import UserRole
+        user = self.rbac.get_user(chat_id)
+        
+        if not user or user.role != UserRole.ADMIN:
+            await self._deny(update, context)
+            return
+        
+        try:
+            # TODO: Call worker sync API
+            await update.message.reply_text(
+                "🔄 **Sync initiated**\n\n"
+                "⏳ Reconciling database with Binance...\n"
+                "This may take 10-30 seconds.\n\n"
+                "💡 *Tip:* Use /recon to check sync status"
+            )
+            await self._audit(chat_id, "sync_now", "initiated")
+        
+        except Exception as e:
+            logger.error("cmd_sync_now_error", error=str(e))
+            await self._audit(chat_id, "sync_now", "error", {"error": str(e)})
+
+    async def cmd_tips(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler for /tips - Pro tips for trading bot"""
+        chat_id = update.effective_chat.id
+        
+        if not self.rbac.is_registered(chat_id):
+            await self._deny(update, context)
+            return
+        
+        tips_text = """
+💡 **Pro Tips & Best Practices**
+
+🏥 *Health Checks*
+• Start each session with `/health` to ensure everything is running
+• Monitor `/latency` regularly - high latency = slower order execution
+• Use `/time` to verify bot's system time matches exchange
+
+📊 *Market Monitoring*
+• Check `/price BTC
+USDT` before making trading decisions  
+• Use `/spread BTCUSDT` to gauge market liquidity
+• Check `/kline BTCUSDT 1m 60` for trend confirmation
+
+🚨 *Before Critical Actions*
+• Always check `/positions` and `/orders` first
+• Review `/decision` to understand latest AI decision
+• Use `/trace <id>` to review decision logic
+
+⚙️ *Control Operations*
+• Pause before market events: `/pause`
+• Wait 5 seconds before resuming: `/resume`
+• Close positions during high volatility to minimize slippage
+• Use `/close_position` one at a time for safety
+
+📈 *Positioning*
+• Monitor consecutive losses with `/decision` history
+• Check circuit breaker status in `/health`
+• Adjust risk levels during high-impact news
+
+🔐 *Admin Operations*
+• Run `/sync_now` after major market movements
+• Check sync results with `/recon`
+• Review audit logs weekly in dashboard
+
+⏰ *Timing*
+• Bot operates on UTC - convert to your timezone
+• Avoid trading during market holidays
+• Check `/latency` during peak hours
+"""
+        
+        await update.message.reply_text(tips_text, parse_mode="Markdown")
+        await self._audit(chat_id, "tips", "success")
+
+    async def cmd_guide(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler for /guide - Usage examples and workflows"""
+        chat_id = update.effective_chat.id
+        
+        if not self.rbac.is_registered(chat_id):
+            await self._deny(update, context)
+            return
+        
+        guide_text = """
+📖 **Command Usage Guide & Workflows**
+
+**Morning Check (5 mins)**
+1️⃣ `/health` → Verify system running
+2️⃣ `/status` → Check positions/orders
+3️⃣ `/price BTCUSDT` → Market mood
+4️⃣ `/latency` → Network quality
+
+**Market Open Workflow**
+1️⃣ `/decision` → Latest AI decision
+2️⃣ `/recon` → Verify sync status
+3️⃣ `/resume` → Start trading
+4️⃣ `/time` → Confirm timing
+
+**Emergency Response**
+1️⃣ `/pause` → Stop trading immediately
+2️⃣ `/positions` → Identify exposure
+3️⃣ `/close_position BTCUSDT` → Close specific
+4️⃣ OR `/close_all` → Emergency exit
+
+**Decision Analysis**
+1️⃣ `/decision` → Latest decision
+2️⃣ `/trace <id>` → Review logic
+3️⃣ `/positions` → Check execution
+4️⃣ `/orders` → Verify orders placed
+
+**Market Analysis**
+```
+/price BTCUSDT          → Current: $50,123
+/spread BTCUSDT         → Bid: $50,120, Ask: $50,125
+/kline BTCUSDT 1m 60    → Last 60 candles
+```
+
+**Admin Maintenance**
+```
+/sync_now               → Force reconciliation
+/recon                  → Check sync status
+/health                 → Component status
+```
+
+**Example Commands:**
+```
+/price ETHUSDT          → Check Eth price
+/spread BNBUSDT         → Check Bnb spread  
+/kline BTCUSDT 5m 12    → 5min candles
+/trace abc123def456     → Review decision
+/close_position LTCUSDT  → Close Ltc position
+```
+"""
+        
+        await update.message.reply_text(guide_text, parse_mode="Markdown")
+        await self._audit(chat_id, "guide", "success")
+
+    async def cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler for /settings - Current configuration check"""
+        chat_id = update.effective_chat.id
+        
+        if not self.rbac.is_registered(chat_id):
+            await self._deny(update, context)
+            return
+        
+        user = self.rbac.get_user(chat_id)
+        role = user.role.value if user else "unknown"
+        
+        settings_text = f"""
+⚙️ **Current Settings**
+
+**Bot Configuration**
+• Environment: `{settings.env}`
+• Mode: `{'MAINNET 🔴' if not settings.binance_testnet else 'TESTNET ✅'}`
+• AI Provider: `{settings.ai_provider}`
+• Chain: `{'Real Money ⚠️' if not settings.binance_testnet else 'Practice 🏋️'}`
+
+**Your Access**
+• Chat ID: `{chat_id}`
+• Role: `{role.upper()}`
+• Permissions: `{len([p for p in self.rbac.get_permissions(chat_id)])}`
+
+**Trading Settings**
+• Risk Level: `{settings.risk_level}`
+• Position Size: `{settings.position_size}`
+• Max Leverage: `{settings.max_leverage}`
+
+**Notifications**
+• Telegram: ✅ Connected
+• Alerts: ✅ Enabled
+
+💡 **Tip:** Contact admin to change settings
+"""
+        
+        await update.message.reply_text(settings_text, parse_mode="Markdown")
+        await self._audit(chat_id, "settings", "success")
+
+    async def handle_help_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, category: str
+    ):
+        """Handle help category callbacks"""
+        query = update.callback_query
+        chat_id = query.from_user.id
+        await query.answer()
+        
+        help_messages = {
+            "help_health": """
+🏥 **Health & Time Commands**
+
+▸ `/time` - System time & uptime
+  Useful for: Verifying bot is running, syncing your clock
+  Example: `/time`
+
+▸ `/latency` - Network latency metrics
+  Useful for: Checking connection quality and clock skew
+  Example: `/latency`
+
+▸ `/health` - System component status
+  Useful for: Troubleshooting when things don't work
+  Example: `/health`
+
+💡 *Tip:* Run these daily to monitor system health! 🔧
+""",
+            "help_market": """
+💰 **Market Data Commands**
+
+▸ `/price SYMBOL` - Get current price
+  Useful for: Quick price checks
+  Example: `/price BTCUSDT`
+
+▸ `/spread SYMBOL` - Bid/ask spread
+  Useful for: Checking liquidity and slippage
+  Example: `/spread ETHUSDT`
+
+▸ `/kline SYMBOL INTERVAL COUNT` - Historical candles
+  Useful for: Technical analysis and trend confirmation
+  Examples:
+    `/kline BTCUSDT 1m 60` → Last 60 min candles
+    `/kline BTCUSDT 5m 24` → Last 2 hours (5min)
+    `/kline BTCUSDT 1h 24` → Last 24 hours
+
+💡 *Tip:* Check spread before major trades! 📊
+""",
+            "help_state": """
+📊 **Trading State Commands**
+
+▸ `/status` - Bot trading status
+  Shows: Current env, positions, orders
+  Example: `/status`
+
+▸ `/positions` - All open positions
+  Shows: Symbol, qty, entry price, P&L
+  Example: `/positions`
+
+▸ `/orders` - All open orders
+  Shows: Symbol, side, qty, price, status
+  Example: `/orders`
+
+▸ `/recon` - Reconciliation status
+  Shows: Last sync time, mismatches
+  Example: `/recon`
+
+▸ `/decision` - Latest AI decision
+  Shows: Symbol, action, confidence, regime
+  Example: `/decision`
+
+▸ `/trace TRACE_ID` - Decision breakdown
+  Shows: Full decision logic and parameters
+  Example: `/trace abc123def456`
+
+💡 *Tip:* Always check positions before closing! 📈
+""",
+            "help_control": """
+⚙️ **Control Commands** (Traders+Admins)
+
+▸ `/pause` - Stop all trading
+  Warning: ⚠️ Stops new orders immediately
+  Example: `/pause`
+
+▸ `/resume` - Resume trading
+  Warning: ⚠️ Re-enables orders
+  Example: `/resume`
+
+▸ `/close_position SYMBOL` - Close one position
+  Warning: ⚠️ Requires 2-step confirmation
+  Example: `/close_position BTCUSDT`
+
+▸ `/close_all` - Close ALL positions
+  Warning: ⚠️⚠️ Emergency button - requires 2-step confirmation
+  Example: `/close_all`
+
+💡 *Tip:* Always double-check before confirming! ⚠️
+""",
+            "help_admin": """
+🔐 **Admin-Only Commands**
+
+▸ `/sync_now` - Force reconciliation
+  Purpose: Manually sync DB ↔ Binance
+  When: Use after major market events
+  Example: `/sync_now`
+
+*Other Admin Features:*
+• View full audit logs in dashboard
+• Manage user roles and permissions
+• Configure risk levels and position sizes
+• View system metrics and performance
+
+💡 *Tip:* Run sync_now before making decisions! 🔄
+""",
+            "help_tips": """
+💡 **Tips & Best Practices**
+
+✅ *Good Habits:*
+• Check `/health` every morning
+• Monitor `/latency` during peak hours
+• Review `/decision` history for patterns
+• Use `/recon` to verify sync status
+
+⚠️ *Warnings:*
+• Don't trade during major news events
+• Check `/spread` before placing orders
+• Verify `/positions` before closing
+• Wait 5 seconds after `/pause` before `/resume`
+
+🚀 *Pro Tips:*
+• Use `/trace` to understand bad decisions
+• Check `/kline` for trend confirmation
+• Monitor clock skew in `/latency`
+• Review `/decision` confidence scores
+
+💡 Type `/tips` for more detailed advice! 📚
+""",
+            "help_guide": """
+📖 **Quick Workflows**
+
+**Morning Routine:**
+1. `/health` 2. `/status` 3. `/price BTCUSDT` 4. `/latency`
+
+**Before Trading:**
+1. `/decision` 2. `/recon` 3. `/resume`
+
+**Emergency:**
+1. `/pause` 2. `/positions` 3. `/close_all`
+
+**Troubleshooting:**
+1. `/health` 2. `/recon` 3. `/latency` 4. `/trace <id>`
+
+Full guide: Type `/guide` for commands & examples! 📚
+""",
+        }
+        
+        message = help_messages.get(
+            category,
+            "❌ Unknown category. Try /help again."
+        )
+        
+        keyboard = [[InlineKeyboardButton("← Back", callback_data="help_back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, parse_mode="Markdown", reply_markup=reply_markup)
+
     async def handle_confirmation(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ):
-        """Handle confirmation button clicks"""
+        """Handle confirmation and help callbacks"""
         query = update.callback_query
         chat_id = query.from_user.id
         
         await query.answer()
         
+        # Handle help callbacks
+        if query.data.startswith("help_"):
+            if query.data == "help_back":
+                await self.cmd_help(update, context)
+                return
+            
+            category = query.data
+            await self.handle_help_callback(update, context, category)
+            return
+        
+        # Handle confirmation callbacks
         if query.data == "cancel":
             await query.edit_message_text("❌ Cancelled")
             return

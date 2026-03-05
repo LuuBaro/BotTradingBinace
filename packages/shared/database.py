@@ -3,7 +3,6 @@ Async database connection and session management
 """
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Any
-import sqlite3
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     create_async_engine,

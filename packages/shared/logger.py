@@ -5,12 +5,57 @@ import sys
 import structlog
 from datetime import datetime
 from typing import Any
+import re
 from packages.shared.config import settings
 
 
+def redact_sensitive_data(data: str | dict) -> str | dict:
+    """
+    Redact sensitive information (API keys, tokens, secrets)
+    Prevents accidental exposure in logs
+    """
+    if isinstance(data, dict):
+        redacted = {}
+        for key, value in data.items():
+            if any(
+                sensitive in key.lower()
+                for sensitive in [
+                    'api_key', 'secret', 'token', 'password',
+                    'key', 'credential', 'auth', 'jwt'
+                ]
+            ):
+                redacted[key] = '***REDACTED***'
+            elif isinstance(value, str):
+                redacted[key] = redact_sensitive_data(value)
+            else:
+                redacted[key] = value
+        return redacted
+    
+    if not isinstance(data, str):
+        return data
+    
+    # Redact common API key patterns
+    patterns = [
+        (r'sk-proj-[A-Za-z0-9_-]{20,}', '***OPENAI_KEY***'),  # OpenAI
+        (r'sk-ant-[A-Za-z0-9_-]{20,}', '***ANTHROPIC_KEY***'),  # Anthropic
+        (r'gsk_[A-Za-z0-9_-]{20,}', '***GROQ_KEY***'),  # Groq
+        (r'Bearer [A-Za-z0-9_.-]+', '***BEARER_TOKEN***'),
+        (r'Authorization: Bearer [A-Za-z0-9_.-]+', '***BEARER_AUTH***'),
+        (r'[A-Za-z0-9]{64}(?:[A-Za-z0-9]{64})?', '***API_KEY***'),  # Generic long keys
+    ]
+    
+    redacted = data
+    for pattern, replacement in patterns:
+        redacted = re.sub(pattern, replacement, redacted)
+    
+    return redacted
+
+
 def add_timestamp(logger: Any, method_name: str, event_dict: dict) -> dict:
-    """Add timestamp to log event"""
+    """Add timestamp to log event and redact sensitive data"""
     event_dict["timestamp"] = datetime.utcnow().isoformat()
+    # Redact sensitive keys from all log events
+    event_dict = redact_sensitive_data(event_dict)
     return event_dict
 
 

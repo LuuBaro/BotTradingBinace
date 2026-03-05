@@ -35,6 +35,11 @@ export const WalletIndicator: React.FC = () => {
         setTimeoutId(id)
     }
 
+    const toggleDetails = () => {
+        if (timeoutId) clearTimeout(timeoutId)
+        setShowDetails((prev) => !prev)
+    }
+
     useEffect(() => {
         fetchBalance()
         const interval = setInterval(fetchBalance, 30000) // Update every 30s
@@ -54,18 +59,19 @@ export const WalletIndicator: React.FC = () => {
             onMouseLeave={handleMouseLeave}
         >
             <div
-                className="flex items-center gap-4 px-5 py-2.5 glass-dark border border-white/10 rounded-2xl cursor-pointer group hover:border-blue-500/30 transition-all shadow-lg"
+                onClick={toggleDetails}
+                className="flex items-center gap-2 md:gap-4 px-3 md:px-5 py-2 md:py-2.5 glass-dark border border-white/10 rounded-xl md:rounded-2xl cursor-pointer group hover:border-blue-500/30 transition-all shadow-lg"
             >
-                <div className="p-2 bg-blue-500/10 rounded-xl group-hover:scale-110 transition-transform">
-                    <Wallet size={18} className="text-blue-400" />
+                <div className="p-1.5 md:p-2 bg-blue-500/10 rounded-lg md:rounded-xl group-hover:scale-110 transition-transform">
+                    <Wallet size={16} className="md:w-[18px] md:h-[18px] text-blue-400" />
                 </div>
                 <div className="flex flex-col">
-                    <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Wallet Balance</span>
-                    <span className="text-sm font-black text-white font-mono tracking-tighter">
+                    <span className="text-[8px] md:text-[9px] font-black text-slate-500 uppercase tracking-widest">Wallet</span>
+                    <span className="text-xs md:text-sm font-black text-white font-mono tracking-tighter">
                         ${data?.wallet_balance?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </span>
                 </div>
-                <div className={`flex flex-col items-end pl-4 border-l border-white/5`}>
+                <div className={`hidden sm:flex flex-col items-end pl-3 md:pl-4 border-l border-white/5`}>
                     <div className={`flex items-center gap-1 text-[10px] font-black ${isProfit ? 'text-emerald-400' : 'text-rose-400'}`}>
                         {isProfit ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
                         {isProfit ? '+' : ''}{data?.pnl_24h_pct?.toFixed(2)}%
@@ -75,7 +81,14 @@ export const WalletIndicator: React.FC = () => {
             </div>
 
             {showDetails && data?.recent_trades && (
-                <div className="absolute right-0 mt-3 w-80 bg-[#0f172a] border border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.5)] rounded-3xl z-[100] overflow-hidden animate-slideUp">
+                <>
+                    <button
+                        type="button"
+                        className="fixed inset-0 z-[90] bg-black/40 md:hidden"
+                        onClick={() => setShowDetails(false)}
+                        aria-label="Close wallet details"
+                    />
+                    <div className="fixed md:absolute left-2 right-2 md:left-auto md:right-0 top-20 md:top-auto md:mt-3 w-auto md:w-80 max-w-none md:max-w-[90vw] bg-[#0f172a] border border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.5)] rounded-2xl md:rounded-3xl z-[100] overflow-hidden animate-slideUp max-h-[75vh] md:max-h-none flex flex-col">
                     {/* Bridge element to allow mouse movement across the gap */}
                     <div className="absolute -top-3 left-0 right-0 h-3 bg-transparent"></div>
 
@@ -102,7 +115,7 @@ export const WalletIndicator: React.FC = () => {
                         </div>
                     </div>
 
-                    <div className="p-3 space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar">
+                    <div className="p-3 space-y-2 max-h-[50vh] md:max-h-[300px] overflow-y-auto custom-scrollbar">
                         {data.recent_trades.length === 0 ? (
                             <div className="p-8 text-center opacity-30">
                                 <span className="text-[10px] font-bold uppercase tracking-widest">Chưa có giao dịch gần đây</span>
@@ -139,7 +152,8 @@ export const WalletIndicator: React.FC = () => {
                     >
                         Xem nhật ký đầy đủ →
                     </button>
-                </div>
+                    </div>
+                </>
             )}
         </div>
     )

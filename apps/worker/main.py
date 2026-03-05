@@ -195,7 +195,16 @@ class TradingWorker:
             elif ai_mode == "two_tier_same":
                 # 2-Tier Same Mode: Scout (local) + Verifier (local)
                 local_provider = settings.selected_llm or "local"
-                local_model = settings.openai_model if local_provider in ('openai', 'groq') else settings.anthropic_model
+                if local_provider in ('openai', 'groq'):
+                    local_model = settings.openai_model
+                elif local_provider in ('claude', 'anthropic'):
+                    local_model = settings.anthropic_model
+                elif local_provider == 'gemini':
+                    local_model = settings.gemini_model
+                elif local_provider == 'local':
+                    local_model = settings.custom_provider_model or 'local-model'
+                else:
+                    local_model = settings.custom_provider_model or 'local-model'
                 
                 def _get_api_key_for_provider(provider: str) -> str | None:
                     if provider == 'openai':
@@ -238,10 +247,21 @@ class TradingWorker:
                         return settings.anthropic_api_key
                     return None
                 
+                if settings.selected_llm in ('openai', 'groq'):
+                    single_tier_model = settings.openai_model
+                elif settings.selected_llm in ('claude', 'anthropic'):
+                    single_tier_model = settings.anthropic_model
+                elif settings.selected_llm == 'gemini':
+                    single_tier_model = settings.gemini_model
+                elif settings.selected_llm == 'local':
+                    single_tier_model = settings.custom_provider_model or 'local-model'
+                else:
+                    single_tier_model = settings.custom_provider_model or 'local-model'
+
                 llm = get_llm_adapter(
                     provider=settings.selected_llm,
                     api_key=_get_single_tier_api_key(settings.selected_llm),
-                    model=settings.openai_model if settings.selected_llm in ('openai', 'groq') else settings.anthropic_model
+                    model=single_tier_model
                 )
                 self.orchestrator = AIOrchestrator(llm)
                 logger.info("ai_single_tier_linked", provider=llm_provider, model=llm.model)

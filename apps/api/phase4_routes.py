@@ -2,7 +2,7 @@
 Phase 4 Dashboard API Endpoints
 Dashboard authentication, config versioning, WebSocket streams
 """
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel
 from typing import Any
@@ -15,6 +15,9 @@ import httpx
 import uuid
 import json
 import os
+import random
+import smtplib
+from email.message import EmailMessage
 
 from packages.shared.database import AsyncSessionFactory
 from packages.shared.logger import logger
@@ -68,10 +71,95 @@ class Verify2FARequest(BaseModel):
     code: str  # Either TOTP code or backup code
 
 
+class SendSetupEmailOTPRequest(BaseModel):
+    username: str
+    password: str
+    email: str
+
+
+class VerifySetupEmailOTPRequest(BaseModel):
+    email: str
+    otp: str
+
+
+class RequestPasswordResetOTPRequest(BaseModel):
+    email: str
+
+
+class ConfirmPasswordResetOTPRequest(BaseModel):
+    email: str
+    otp: str
+    new_password: str
+
+
+class AccessTelemetryRequest(BaseModel):
+    event_type: str = "session_start"
+    network_online: bool | None = None
+    network_effective_type: str | None = None
+    network_downlink_mbps: float | None = None
+    network_rtt_ms: float | None = None
+    user_agent: str | None = None
+    platform: str | None = None
+    language: str | None = None
+    timezone: str | None = None
+    screen_width: int | None = None
+    screen_height: int | None = None
+    device_memory_gb: float | None = None
+    hardware_concurrency: int | None = None
+
+
 router = APIRouter(tags=["dashboard"])
 security = HTTPBearer()
 
 ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+SETUP_OTP_TTL_MINUTES = 10
+RESET_OTP_TTL_MINUTES = 10
+
+# In-memory OTP stores (sufficient for single-instance deployment in current architecture)
+setup_otp_store: dict[str, dict[str, Any]] = {}
+reset_otp_store: dict[str, dict[str, Any]] = {}
+
+
+def _generate_numeric_otp(length: int = 6) -> str:
+    return ''.join(str(random.randint(0, 9)) for _ in range(length))
+
+
+def _send_email(subject: str, recipient: str, body: str, html_body: str | None = None):
+    """Send email via SMTP if enabled, otherwise log body in demo mode."""
+    recipient = (recipient or "").strip()
+    if not recipient:
+        raise ValueError("Recipient email is required")
+
+    if not settings.smtp_enabled:
+        logger.warning(
+            "smtp_disabled_email_not_sent",
+            recipient=recipient,
+            subject=subject,
+            body_preview=body[:200],
+        )
+        return
+
+    if not settings.smtp_host or not settings.smtp_from_email:
+        raise ValueError("SMTP is enabled but SMTP_HOST/SMTP_FROM_EMAIL is not configured")
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = settings.smtp_from_email
+    msg["To"] = recipient
+    
+    # Set plain text content
+    msg.set_content(body)
+    
+    # Add HTML alternative if provided
+    if html_body:
+        msg.add_alternative(html_body, subtype='html')
+
+    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as server:
+        if settings.smtp_use_tls:
+            server.starttls()
+        if settings.smtp_username and settings.smtp_password:
+            server.login(settings.smtp_username, settings.smtp_password)
+        server.send_message(msg)
 
 
 def _mask_secret(value: str | None) -> str:
@@ -80,6 +168,21 @@ def _mask_secret(value: str | None) -> str:
     if len(value) <= 4:
         return "****"
     return f"{value[:2]}***{value[-2:]}"
+
+
+def _extract_client_ip(request: Request) -> str:
+    xff = (request.headers.get("x-forwarded-for") or "").strip()
+    if xff:
+        return xff.split(",")[0].strip()
+
+    x_real_ip = (request.headers.get("x-real-ip") or "").strip()
+    if x_real_ip:
+        return x_real_ip
+
+    if request.client and request.client.host:
+        return request.client.host
+
+    return "unknown"
 
 
 def _serialize_settings(mask_secrets: bool = True) -> dict:
@@ -99,7 +202,18 @@ def _serialize_settings(mask_secrets: bool = True) -> dict:
         "openai_model": settings.openai_model,
         "anthropic_api_key": _mask_secret(settings.anthropic_api_key) if mask_secrets else settings.anthropic_api_key,
         "anthropic_model": settings.anthropic_model,
+        "groq_api_key": _mask_secret(settings.groq_api_key) if mask_secrets else settings.groq_api_key,
+        "groq_model": settings.groq_model,
+        "gemini_api_key": _mask_secret(settings.gemini_api_key) if mask_secrets else settings.gemini_api_key,
+        "gemini_model": settings.gemini_model,
         "use_local_llm": settings.use_local_llm,
+        "worker_ai_mode": settings.worker_ai_mode,
+        "worker_ai_prompt_level": settings.worker_ai_prompt_level,
+        "worker_ai_scout_provider": settings.worker_ai_scout_provider,
+        "worker_ai_scout_model": settings.worker_ai_scout_model,
+        "worker_ai_verifier_provider": settings.worker_ai_verifier_provider,
+        "worker_ai_verifier_model": settings.worker_ai_verifier_model,
+        "local_llm_base_url": os.getenv("LOCAL_LLM_BASE_URL", settings.custom_provider_url or "http://localhost:1234/v1"),
         "custom_provider_name": settings.custom_provider_name,
         "custom_provider_url": settings.custom_provider_url,
         "custom_provider_key": _mask_secret(settings.custom_provider_key) if mask_secrets else settings.custom_provider_key,
@@ -130,6 +244,11 @@ class SettingsUpdate(BaseModel):
     use_local_llm: bool | None = None
     worker_ai_mode: str | None = None
     worker_ai_prompt_level: str | None = None
+    worker_ai_scout_provider: str | None = None
+    worker_ai_scout_model: str | None = None
+    worker_ai_verifier_provider: str | None = None
+    worker_ai_verifier_model: str | None = None
+    local_llm_base_url: str | None = None
     custom_provider_name: str | None = None
     custom_provider_url: str | None = None
     custom_provider_key: str | None = None
@@ -138,6 +257,193 @@ class SettingsUpdate(BaseModel):
 
 
 # ===== Authentication Endpoints =====
+
+@router.post("/auth/setup/send-email-otp", response_model=dict)
+async def send_setup_email_otp(request: SendSetupEmailOTPRequest):
+    """Send OTP email for first-time admin setup."""
+    if user_manager.is_setup_complete():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="System is already configured. Contact admin to reset.",
+        )
+
+    username = request.username.strip()
+    password = request.password
+    email = request.email.strip().lower()
+
+    if not username or not password or not email:
+        raise HTTPException(status_code=400, detail="Username, password, and email are required")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="Invalid email format")
+
+    otp = _generate_numeric_otp(6)
+    expires_at = datetime.utcnow() + timedelta(minutes=SETUP_OTP_TTL_MINUTES)
+    setup_otp_store[email] = {
+        "username": username,
+        "password": password,
+        "otp": otp,
+        "expires_at": expires_at,
+        "created_at": datetime.utcnow(),
+    }
+
+    subject = f"[{settings.app_name}] Verify admin setup"
+    body = (
+        f"Your setup verification code is: {otp}\n\n"
+        f"This code expires in {SETUP_OTP_TTL_MINUTES} minutes.\n"
+        "If you did not request this, please ignore this email."
+    )
+    
+    # Professional HTML email template
+    html_body = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Verification</title>
+</head>
+<body style="margin: 0; padding: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="min-height: 100vh;">
+        <tr>
+            <td align="center" style="padding: 40px 20px;">
+                <table width="100%" style="max-width: 600px; background: white; border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); overflow: hidden;">
+                    <!-- Header with gradient -->
+                    <tr>
+                        <td style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
+                            <h1 style="margin: 0; color: white; font-size: 28px; font-weight: 700; letter-spacing: -0.5px;">
+                                🤖 {settings.app_name}
+                            </h1>
+                            <p style="margin: 10px 0 0 0; color: rgba(255,255,255,0.9); font-size: 14px;">
+                                AI-Powered Trading Platform
+                            </p>
+                        </td>
+                    </tr>
+                    
+                    <!-- Content -->
+                    <tr>
+                        <td style="padding: 50px 40px;">
+                            <h2 style="margin: 0 0 20px 0; color: #1a202c; font-size: 24px; font-weight: 600;">
+                                Verify Admin Setup
+                            </h2>
+                            
+                            <p style="margin: 0 0 30px 0; color: #4a5568; font-size: 16px; line-height: 1.6;">
+                                Welcome! You're just one step away from setting up your trading bot. 
+                                Use the verification code below to complete your admin account setup.
+                            </p>
+                            
+                            <!-- OTP Code Box -->
+                            <table width="100%" cellpadding="0" cellspacing="0" style="margin: 30px 0;">
+                                <tr>
+                                    <td align="center">
+                                        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 30px; display: inline-block;">
+                                            <p style="margin: 0 0 10px 0; color: rgba(255,255,255,0.9); font-size: 14px; font-weight: 500; text-transform: uppercase; letter-spacing: 1px;">
+                                                Verification Code
+                                            </p>
+                                            <p style="margin: 0; color: white; font-size: 42px; font-weight: 700; letter-spacing: 8px; font-family: 'Courier New', monospace;">
+                                                {otp}
+                                            </p>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                            <!-- Expiry notice -->
+                            <table width="100%" cellpadding="0" cellspacing="0" style="margin: 30px 0;">
+                                <tr>
+                                    <td style="background: #f7fafc; border-left: 4px solid #667eea; border-radius: 8px; padding: 20px;">
+                                        <p style="margin: 0; color: #4a5568; font-size: 14px; line-height: 1.5;">
+                                            ⏰ <strong>This code expires in {SETUP_OTP_TTL_MINUTES} minutes.</strong><br>
+                                            <span style="color: #718096;">Please complete the verification process before it expires.</span>
+                                        </p>
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                            <!-- Security notice -->
+                            <p style="margin: 30px 0 0 0; color: #718096; font-size: 13px; line-height: 1.6;">
+                                🔒 <strong>Security Notice:</strong> If you didn't request this verification code, 
+                                please ignore this email. Your account security is important to us.
+                            </p>
+                        </td>
+                    </tr>
+                    
+                    <!-- Footer -->
+                    <tr>
+                        <td style="background: #f7fafc; padding: 30px 40px; border-top: 1px solid #e2e8f0;">
+                            <p style="margin: 0 0 10px 0; color: #718096; font-size: 13px; text-align: center;">
+                                This is an automated message from {settings.app_name}
+                            </p>
+                            <p style="margin: 0; color: #a0aec0; font-size: 12px; text-align: center;">
+                                © 2024 TiznDBot. All rights reserved.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+"""
+
+    try:
+        _send_email(subject=subject, recipient=email, body=body, html_body=html_body)
+    except Exception as e:
+        logger.error("send_setup_email_otp_failed", email=email, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to send OTP email: {str(e)}")
+
+    logger.info("setup_email_otp_sent", email=email, username=username)
+    response = {
+        "success": True,
+        "message": f"OTP has been sent to {email}",
+        "expires_in_seconds": SETUP_OTP_TTL_MINUTES * 60,
+    }
+    if not settings.smtp_enabled and settings.env == "demo":
+        response["dev_otp"] = otp
+    return response
+
+
+@router.post("/auth/setup/verify-email-otp", response_model=dict)
+async def verify_setup_email_otp(request: VerifySetupEmailOTPRequest):
+    """Verify setup OTP and create first admin account."""
+    if user_manager.is_setup_complete():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="System is already configured. Contact admin to reset.",
+        )
+
+    email = request.email.strip().lower()
+    otp = request.otp.strip()
+    otp_data = setup_otp_store.get(email)
+
+    if not otp_data:
+        raise HTTPException(status_code=400, detail="No OTP session found for this email")
+    if datetime.utcnow() > otp_data["expires_at"]:
+        del setup_otp_store[email]
+        raise HTTPException(status_code=400, detail="OTP expired. Please request a new one")
+    if otp_data["otp"] != otp:
+        raise HTTPException(status_code=401, detail="Invalid OTP")
+
+    success, message = user_manager.create_first_user(
+        otp_data["username"],
+        otp_data["password"],
+        email,
+    )
+    del setup_otp_store[email]
+
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    logger.info("system_setup_complete_via_email_otp", username=otp_data["username"], email=email)
+    return {
+        "success": True,
+        "message": "Admin user created and email verified. Continue to 2FA setup.",
+        "username": otp_data["username"],
+        "email": email,
+        "requires_2fa_setup": True,
+    }
 
 @router.post("/auth/setup", response_model=dict)
 async def setup(request: SetupRequest):
@@ -199,9 +505,19 @@ async def setup(request: SetupRequest):
 
 @router.get("/auth/setup-status", response_model=dict)
 async def setup_status():
-    """Check if system setup is complete"""
+    """Check if system setup is complete - based on whether admin user exists"""
+    # Check if admin user exists in user_manager (first user = admin)
+    # This persists across endpoint calls but resets on server restart
+    # For true persistence, we should use database, but for MVP this works
+    setup_complete = user_manager.is_setup_complete()
+    
+    # If setup_complete is False but users exist, it means server restarted
+    # In production, this should be persisted in database
+    if not setup_complete and len(user_manager.users) > 0:
+        setup_complete = True
+    
     return {
-        "setup_complete": user_manager.is_setup_complete(),
+        "setup_complete": setup_complete,
     }
 
 
@@ -247,22 +563,21 @@ async def login(request: LoginRequest):
                 },
             }
 
-        # If 2FA not enabled, create JWT and return
-        token = jwt_handler.create_access_token(user)
-
-        logger.info("user_login", username=request.username, role=user.role, totp_enabled=False)
-
+        # 2FA is mandatory for login in this hardened flow
+        logger.info("user_login_requires_totp_setup", username=request.username, role=user.role)
         return {
-            "access_token": token.access_token,
-            "token_type": token.token_type,
-            "expires_in": token.expires_in,
+            "access_token": None,
+            "token_type": None,
+            "expires_in": None,
             "totp_enabled": False,
+            "requires_2fa_setup": True,
             "user": {
                 "id": user.id,
                 "username": user.username,
                 "email": user.email,
                 "role": user.role,
             },
+            "message": "2FA setup is required before first secure login",
         }
     except Exception as e:
         if isinstance(e, HTTPException):
@@ -356,7 +671,8 @@ async def setup_totp(request: SetupTOTPRequest):
             raise HTTPException(status_code=400, detail="Username and password required")
         
         # Kiểm tra thông tin đăng nhập
-        if not user_manager.verify_password(request.username, request.password):
+        auth_ok, _ = user_manager.verify_password(request.username, request.password)
+        if not auth_ok:
             raise HTTPException(status_code=401, detail="Invalid credentials")
         
         # Check if 2FA setup is allowed (only 1 user can setup on first init)
@@ -508,7 +824,8 @@ async def reset_totp(request: dict, credentials: Any = Depends(security)):
             raise HTTPException(status_code=400, detail="Password required")
         
         # Verify password
-        if not user_manager.verify_password(user.username, password):
+        password_ok, _ = user_manager.verify_password(user.username, password)
+        if not password_ok:
             raise HTTPException(status_code=401, detail="Invalid password")
         
         # Reset TOTP
@@ -592,6 +909,82 @@ async def reset_password(request: dict):
         raise HTTPException(status_code=500, detail="Password reset failed")
 
 
+@router.post("/auth/request-password-reset-otp")
+async def request_password_reset_otp(request: RequestPasswordResetOTPRequest):
+    """Request password reset OTP via registered email."""
+    email = request.email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email is required")
+
+    username = user_manager.get_username_by_email(email)
+    if not username:
+        raise HTTPException(status_code=404, detail="No account found with this email")
+
+    otp = _generate_numeric_otp(6)
+    expires_at = datetime.utcnow() + timedelta(minutes=RESET_OTP_TTL_MINUTES)
+    reset_otp_store[email] = {
+        "username": username,
+        "otp": otp,
+        "expires_at": expires_at,
+        "created_at": datetime.utcnow(),
+    }
+
+    subject = f"[{settings.app_name}] Password reset OTP"
+    body = (
+        f"Your password reset code is: {otp}\n\n"
+        f"This code expires in {RESET_OTP_TTL_MINUTES} minutes.\n"
+        "If you did not request this, please secure your account immediately."
+    )
+
+    try:
+        _send_email(subject=subject, recipient=email, body=body)
+    except Exception as e:
+        logger.error("send_reset_email_otp_failed", email=email, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to send reset OTP: {str(e)}")
+
+    logger.info("password_reset_otp_sent", email=email, username=username)
+    response = {
+        "success": True,
+        "message": f"Password reset OTP has been sent to {email}",
+        "expires_in_seconds": RESET_OTP_TTL_MINUTES * 60,
+    }
+    if not settings.smtp_enabled and settings.env == "demo":
+        response["dev_otp"] = otp
+    return response
+
+
+@router.post("/auth/confirm-password-reset-otp")
+async def confirm_password_reset_otp(request: ConfirmPasswordResetOTPRequest):
+    """Confirm OTP and set a new password."""
+    email = request.email.strip().lower()
+    otp = request.otp.strip()
+    new_password = request.new_password.strip()
+
+    if len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+
+    otp_data = reset_otp_store.get(email)
+    if not otp_data:
+        raise HTTPException(status_code=400, detail="No reset OTP session found for this email")
+    if datetime.utcnow() > otp_data["expires_at"]:
+        del reset_otp_store[email]
+        raise HTTPException(status_code=400, detail="OTP expired. Please request a new one")
+    if otp_data["otp"] != otp:
+        raise HTTPException(status_code=401, detail="Invalid OTP")
+
+    username = otp_data["username"]
+    if not user_manager.set_password(username, new_password):
+        raise HTTPException(status_code=400, detail="Failed to set new password")
+
+    del reset_otp_store[email]
+    logger.info("password_reset_otp_confirmed", email=email, username=username)
+    return {
+        "success": True,
+        "message": "Password has been reset successfully. Please login with your new password and 2FA code.",
+        "username": username,
+    }
+
+
 @router.post("/auth/change-password")
 async def change_password(request: dict, credentials: Any = Depends(security)):
     """Change user password (authenticated endpoint)
@@ -608,13 +1001,14 @@ async def change_password(request: dict, credentials: Any = Depends(security)):
         if not old_password or not new_password:
             raise HTTPException(status_code=400, detail="Both old and new password are required")
         
-        if not user_manager.verify_password(user.username, old_password):
+        password_ok, _ = user_manager.verify_password(user.username, old_password)
+        if not password_ok:
             raise HTTPException(status_code=401, detail="Old password is incorrect")
         
         if len(new_password) < 4:
             raise HTTPException(status_code=400, detail="New password must be at least 4 characters")
         
-        if user_manager.change_password(user.username, new_password):
+        if user_manager.change_password(user.username, old_password, new_password):
             logger.info("user_password_changed", username=user.username)
             return {"message": "Password changed successfully"}
         else:
@@ -736,6 +1130,51 @@ async def get_events(
                 for e in events
             ]
         }
+
+
+@router.post("/access/telemetry")
+async def log_access_telemetry(
+    payload: AccessTelemetryRequest,
+    request: Request,
+    credentials: Any = Depends(security)
+):
+    """Log client network/device telemetry including source IP into system events."""
+    user = jwt_handler.verify_token(credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    ip = _extract_client_ip(request)
+    evt = (payload.event_type or "session_start").strip()[:50]
+
+    async with AsyncSessionFactory() as db:
+        event = Event(
+            timestamp=datetime.utcnow(),
+            level="INFO",
+            code="ACCESS_TELEMETRY",
+            message=f"Access telemetry [{evt}] user={user.username} ip={ip}",
+            data_json={
+                "event_type": evt,
+                "username": user.username,
+                "role": user.role,
+                "ip": ip,
+                "network_online": payload.network_online,
+                "network_effective_type": payload.network_effective_type,
+                "network_downlink_mbps": payload.network_downlink_mbps,
+                "network_rtt_ms": payload.network_rtt_ms,
+                "user_agent": payload.user_agent,
+                "platform": payload.platform,
+                "language": payload.language,
+                "timezone": payload.timezone,
+                "screen_width": payload.screen_width,
+                "screen_height": payload.screen_height,
+                "device_memory_gb": payload.device_memory_gb,
+                "hardware_concurrency": payload.hardware_concurrency,
+            }
+        )
+        db.add(event)
+        await db.commit()
+
+    return {"status": "ok", "logged": True}
 
 
 @router.get("/health/status")
@@ -1806,12 +2245,22 @@ async def update_settings(payload: SettingsUpdate, credentials: Any = Depends(se
         _set_if_provided("worker_ai_mode", payload.worker_ai_mode, "worker")
     if payload.worker_ai_prompt_level is not None:
         _set_if_provided("worker_ai_prompt_level", payload.worker_ai_prompt_level, "worker")
-    
-    # Custom Provider
+    if payload.worker_ai_scout_provider is not None:
+        _set_if_provided("worker_ai_scout_provider", payload.worker_ai_scout_provider, "worker")
+    if payload.worker_ai_scout_model is not None:
+        _set_if_provided("worker_ai_scout_model", payload.worker_ai_scout_model, "worker")
+    if payload.worker_ai_verifier_provider is not None:
+        _set_if_provided("worker_ai_verifier_provider", payload.worker_ai_verifier_provider, "worker")
+    if payload.worker_ai_verifier_model is not None:
+        _set_if_provided("worker_ai_verifier_model", payload.worker_ai_verifier_model, "worker")
+
+    # Custom / Local Provider
     if payload.custom_provider_name is not None:
         _set_if_provided("custom_provider_name", payload.custom_provider_name, "worker")
     if payload.custom_provider_url is not None:
         _set_if_provided("custom_provider_url", payload.custom_provider_url, "worker")
+    if payload.local_llm_base_url is not None:
+        _set_if_provided("custom_provider_url", payload.local_llm_base_url, "worker")
     if payload.custom_provider_key:
         _set_if_provided("custom_provider_key", payload.custom_provider_key, "worker")
     if payload.custom_provider_model is not None:
@@ -1847,6 +2296,11 @@ async def update_settings(payload: SettingsUpdate, credentials: Any = Depends(se
             "CUSTOM_PROVIDER_URL": settings.custom_provider_url or "",
             "CUSTOM_PROVIDER_KEY": settings.custom_provider_key or "",
             "CUSTOM_PROVIDER_MODEL": settings.custom_provider_model or "",
+            "WORKER_AI_SCOUT_PROVIDER": settings.worker_ai_scout_provider or "groq",
+            "WORKER_AI_SCOUT_MODEL": settings.worker_ai_scout_model or "llama-3.1-8b-instant",
+            "WORKER_AI_VERIFIER_PROVIDER": settings.worker_ai_verifier_provider or "openai",
+            "WORKER_AI_VERIFIER_MODEL": settings.worker_ai_verifier_model or "gpt-4-turbo",
+            "LOCAL_LLM_BASE_URL": settings.custom_provider_url or os.getenv("LOCAL_LLM_BASE_URL", "http://localhost:1234/v1"),
         }
         for key, value in env_updates.items():
             set_key(str(ENV_PATH), key, value if value is not None else "")

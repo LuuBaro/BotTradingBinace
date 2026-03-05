@@ -117,19 +117,47 @@ export const SettingsPage: React.FC = () => {
     try {
       setMessage(null)
       // Only send non-secret settings + new keys (don't spread old masked keys)
+      const selectedProvider = settings.selected_llm || 'mock'
+      const effectiveCustomModel = customProviderModel || settings.custom_provider_model || 'local-model'
+      const effectiveCustomUrl = customProviderUrl || settings.custom_provider_url || settings.local_llm_base_url || 'http://localhost:1234/v1'
+
+      // Auto-align worker providers based on architecture mode selected in UI
+      const workerScoutProvider = workerAiMode === 'two_tier_same' ? selectedProvider : (settings.worker_ai_scout_provider || 'groq')
+      const workerVerifierProvider = workerAiMode === 'two_tier_same' ? selectedProvider : (settings.worker_ai_verifier_provider || 'openai')
+      const workerScoutModel = workerAiMode === 'two_tier_same'
+        ? (selectedProvider === 'openai' ? (settings.openai_model || 'gpt-4o-mini')
+          : selectedProvider === 'groq' ? (settings.groq_model || 'llama-3.1-8b-instant')
+          : selectedProvider === 'anthropic' ? (settings.anthropic_model || 'claude-3-sonnet')
+          : selectedProvider === 'gemini' ? (settings.gemini_model || 'gemini-1.5-pro')
+          : effectiveCustomModel)
+        : (settings.worker_ai_scout_model || 'llama-3.1-8b-instant')
+      const workerVerifierModel = workerAiMode === 'two_tier_same'
+        ? workerScoutModel
+        : (settings.worker_ai_verifier_model || 'gpt-4o-mini')
+
       const payload: Record<string, any> = {
         env: settings.env,
         api_host: settings.api_host,
         api_port: settings.api_port,
-        selected_llm: settings.selected_llm,
+        binance_testnet: settings.binance_testnet,
+        telegram_admin_ids: settings.telegram_admin_ids,
+        telegram_trader_ids: settings.telegram_trader_ids,
+        selected_llm: selectedProvider,
         use_local_llm: settings.use_local_llm,
         openai_model: settings.openai_model,
         anthropic_model: settings.anthropic_model,
+        groq_model: settings.groq_model,
+        gemini_model: settings.gemini_model,
         worker_ai_mode: workerAiMode,
         worker_ai_prompt_level: workerAiPromptLevel,
+        worker_ai_scout_provider: workerScoutProvider,
+        worker_ai_scout_model: workerScoutModel,
+        worker_ai_verifier_provider: workerVerifierProvider,
+        worker_ai_verifier_model: workerVerifierModel,
+        local_llm_base_url: effectiveCustomUrl,
         custom_provider_name: customProviderName || settings.custom_provider_name,
-        custom_provider_url: customProviderUrl || settings.custom_provider_url,
-        custom_provider_model: customProviderModel || settings.custom_provider_model,
+        custom_provider_url: effectiveCustomUrl,
+        custom_provider_model: effectiveCustomModel,
         persist: 'both',
       }
 
@@ -343,12 +371,12 @@ export const SettingsPage: React.FC = () => {
   }
 
   return (
-    <div className="space-y-10 animate-fadeIn bg-mesh min-h-full pb-20 px-4 pt-4">
+    <div className="space-y-6 md:space-y-10 animate-fadeIn bg-mesh min-h-full pb-20 px-4 pt-4">
       {/* Delete Confirmation Modal */}
       {showDeleteConfirm && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
           <div className="relative max-w-md w-full animate-fadeIn">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl border border-slate-700/50 shadow-2xl p-6 space-y-4">
+            <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl border border-slate-700/50 shadow-2xl p-4 md:p-6 space-y-4">
               <div className="flex items-start gap-4">
                 <div className="flex-shrink-0">
                   <div className="flex items-center justify-center h-12 w-12 rounded-lg bg-rose-500/10 border border-rose-500/20">
@@ -391,17 +419,17 @@ export const SettingsPage: React.FC = () => {
       )}
 
       {/* Header */}
-      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-6">
+      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-4 md:gap-6">
         <div className="space-y-2">
           <div className="flex items-center gap-2">
             <Settings2 className="text-blue-400" size={14} />
             <span className="text-[10px] uppercase font-black tracking-[0.3em] text-blue-400">Core Engine Configuration</span>
           </div>
-          <h1 className="text-5xl font-black tracking-tighter text-white">System Settings</h1>
-          <p className="text-slate-400 font-medium">Global environment variables, API keys, and external data sources provisioning.</p>
+          <h1 className="text-3xl md:text-5xl font-black tracking-tighter text-white">System Settings</h1>
+          <p className="text-slate-400 font-medium text-sm md:text-base">Global environment variables, API keys, and external data sources provisioning.</p>
         </div>
-        <div className="flex gap-3">
-          <button onClick={handleSave} className="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-black uppercase tracking-widest text-xs flex items-center gap-2 transition-all shadow-lg shadow-blue-600/20">
+        <div className="flex gap-2 md:gap-3 w-full lg:w-auto">
+          <button onClick={handleSave} className="flex-1 lg:flex-initial px-4 md:px-6 py-2 md:py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl md:rounded-2xl font-black uppercase tracking-widest text-xs flex items-center justify-center gap-2 transition-all shadow-lg shadow-blue-600/20">
             <Save size={16} />
             Save Globals
           </button>
@@ -431,23 +459,23 @@ export const SettingsPage: React.FC = () => {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 md:gap-8">
 
         {/* Core Config */}
-        <div className="lg:col-span-8 flex flex-col gap-8">
+        <div className="lg:col-span-8 flex flex-col gap-6 md:gap-8">
           <div className="card glass-dark border-white/5 overflow-hidden group">
             <div className="card-header border-b border-white/5 bg-white/[0.02]">
-              <h2 className="text-xl font-black flex items-center gap-3">
+              <h2 className="text-lg md:text-xl font-black flex items-center gap-3">
                 <KeyRound className="text-purple-400" size={20} />
                 API Gateways & Secrets
               </h2>
             </div>
-            <div className="p-8 space-y-8">
+            <div className="p-4 md:p-8 space-y-6 md:space-y-8">
 
               {/* Environment */}
-              <div className="space-y-4">
+              <div className="space-y-3 md:space-y-4">
                 <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Environment Targeting</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
                   <div>
                     <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Execution Mode</label>
                     <select
@@ -622,12 +650,12 @@ export const SettingsPage: React.FC = () => {
                 </div>
 
                 {/* Prompt Level Selection */}
-                <div className="mt-6 space-y-3">
+                <div className="mt-4 md:mt-6 space-y-3">
                   <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Prompt Optimization Level</label>
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-3 gap-1.5 md:gap-2">
                     <button
                       onClick={() => setWorkerAiPromptLevel('lightweight')}
-                      className={`py-2 px-3 rounded-lg text-[11px] font-bold transition-all ${
+                      className={`py-1.5 md:py-2 px-2 md:px-3 rounded-lg text-[10px] md:text-[11px] font-bold transition-all ${
                         workerAiPromptLevel === 'lightweight'
                           ? 'bg-amber-500/30 border border-amber-500/50 text-white'
                           : 'bg-white/5 border border-white/10 text-slate-400 hover:bg-white/10'
@@ -799,12 +827,12 @@ export const SettingsPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Custom Provider Section */}
-                {settings.selected_llm === 'custom' && (
+                {/* Local / Custom Provider Section */}
+                {(settings.selected_llm === 'custom' || settings.selected_llm === 'local') && (
                   <div className="bg-purple-500/10 border border-purple-500/20 rounded-xl p-6 space-y-4 mt-4">
                     <h4 className="text-sm font-black text-purple-300 uppercase tracking-wider flex items-center gap-2">
                       <KeyRound size={14} />
-                      Custom LLM Provider Configuration
+                      {settings.selected_llm === 'local' ? 'Local Model Endpoint Configuration' : 'Custom LLM Provider Configuration'}
                     </h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div>
@@ -838,9 +866,9 @@ export const SettingsPage: React.FC = () => {
                       </label>
                       <input
                         type="text"
-                        placeholder="https://api.your-provider.com/v1/chat/completions"
+                        placeholder={settings.selected_llm === 'local' ? 'http://localhost:1234/v1' : 'https://api.your-provider.com/v1/chat/completions'}
                         className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-purple-500/50 transition-colors font-mono text-xs"
-                        value={customProviderUrl || settings.custom_provider_url || ''}
+                        value={customProviderUrl || settings.custom_provider_url || settings.local_llm_base_url || ''}
                         onChange={(e) => setCustomProviderUrl(e.target.value)}
                       />
                     </div>
@@ -863,7 +891,9 @@ export const SettingsPage: React.FC = () => {
                       )}
                     </div>
                     <p className="text-[9px] text-slate-500 italic">
-                      ⚠️ Custom provider should support OpenAI-compatible API format
+                      ⚠️ {settings.selected_llm === 'local'
+                        ? 'Local server must expose OpenAI-compatible API (e.g. LM Studio server, Ollama bridge, vLLM)'
+                        : 'Custom provider should support OpenAI-compatible API format'}
                     </p>
                   </div>
                 )}

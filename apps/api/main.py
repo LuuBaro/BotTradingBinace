@@ -2,7 +2,6 @@
 FastAPI Server - REST API + WebSocket for dashboard
 """
 import asyncio
-import sqlite3
 from datetime import datetime, timedelta
 from typing import List
 from contextlib import asynccontextmanager
@@ -27,6 +26,8 @@ from packages.shared.logger import logger
 from packages.shared.worker_state import worker_state
 from apps.api.phase4_routes import router as phase4_router
 from apps.api.phase6_routes import router as phase6_router
+from apps.api.phase8_message_routes import router as phase8_router
+from apps.api.health_check import router as health_router
 from apps.api.websocket import ws_manager
 
 
@@ -34,10 +35,25 @@ from apps.api.websocket import ws_manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and cleanup on startup/shutdown"""
-    logger.info("api_server_starting")
+    # Log startup with environment warning
+    if not settings.binance_testnet:
+        logger.warning(
+            "api_server_starting_mainnet",
+            warning="🔴 MAINNET PRODUCTION MODE - REAL MONEY AT RISK",
+            environment=settings.env,
+            binance_testnet=settings.binance_testnet,
+        )
+    else:
+        logger.info(
+            "api_server_starting_testnet",
+            message="✓ Testnet mode - no real money at risk",
+            environment=settings.env,
+            binance_testnet=settings.binance_testnet,
+        )
+    
     try:
         await init_db()
-    except sqlite3.OperationalError as exc:
+    except Exception as exc:
         logger.warning("api_init_db_skipped", error=str(exc))
     # Start background polling tasks
     polling_task = asyncio.create_task(poll_and_broadcast_events())
@@ -99,15 +115,21 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: Restrict in production
+    allow_origins=[
+        "https://yourdomain.com",        # Production domain
+        "https://www.yourdomain.com",
+        "http://localhost:3000",         # Development only
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Include routers
+app.include_router(health_router)  # Health checks at /health prefix
 app.include_router(phase4_router, prefix="/api")
 app.include_router(phase6_router, prefix="/api")
+app.include_router(phase8_router, prefix="/api")
 
 
 #Dependency imported from packages.shared.database

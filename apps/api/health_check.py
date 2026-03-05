@@ -317,6 +317,40 @@ class AlertManager:
 alert_manager = AlertManager()
 
 
+@router.get("/environment")
+async def environment_check() -> Dict[str, Any]:
+    """
+    Check current environment and warn if in production mode.
+    Used to prevent accidental mainnet trades.
+    """
+    from packages.shared.config import settings
+    
+    is_testnet = settings.binance_testnet
+    is_live_env = settings.env == "live"
+    
+    # Determine risk level
+    if is_testnet:
+        risk_level = "safe"
+        warning = "✓ Testnet mode - NO REAL MONEY AT RISK"
+    elif is_live_env and not is_testnet:
+        risk_level = "danger"
+        warning = "🔴 MAINNET PRODUCTION MODE - REAL MONEY AT RISK"
+    else:
+        risk_level = "warning"
+        warning = "⚠️ Demo mode with real exchange settings"
+    
+    return {
+        "status": "ok",
+        "environment": settings.env,
+        "binance_testnet": is_testnet,
+        "mode": "beta" if is_testnet else "production",
+        "risk_level": risk_level,
+        "warning": warning,
+        "timestamp": datetime.utcnow().isoformat(),
+        "ai_provider": settings.selected_llm,
+    }
+
+
 def setup_health_monitoring(app):
     """Setup health monitoring for FastAPI app"""
     app.include_router(router)

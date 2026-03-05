@@ -59,17 +59,17 @@ export const PositionsPage: React.FC = () => {
   const totalPnL = positions.reduce((acc, p) => acc + (p.unrealized_pnl || 0), 0)
 
   return (
-    <div className="space-y-10 animate-fadeIn bg-mesh min-h-full pb-20 px-4 pt-4">
+    <div className="space-y-6 md:space-y-10 animate-fadeIn bg-mesh min-h-full pb-20 px-4 pt-4">
       {/* Manual Trade Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-[#020617]/80 backdrop-blur-md" onClick={() => setIsModalOpen(false)}></div>
-          <div className="card glass-dark w-full max-w-md relative z-10 border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.5)] p-8 animate-slideUp">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl font-black text-white">Mở vị thế thủ công</h2>
-              <button onClick={() => setIsModalOpen(false)} className="text-slate-500 hover:text-white"><X size={24} /></button>
+          <div className="card glass-dark w-full max-w-md relative z-10 border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.5)] p-4 md:p-8 animate-slideUp">
+            <div className="flex justify-between items-center mb-4 md:mb-6">
+              <h2 className="text-xl md:text-2xl font-black text-white">Mở vị thế thủ công</h2>
+              <button onClick={() => setIsModalOpen(false)} className="text-slate-500 hover:text-white"><X size={20} className="md:w-6 md:h-6" /></button>
             </div>
-            <form onSubmit={handleManualTrade} className="space-y-6">
+            <form onSubmit={handleManualTrade} className="space-y-4 md:space-y-6">
               <div className="space-y-2">
                 <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Cặp giao dịch (Symbol)</label>
                 <input
@@ -130,60 +130,60 @@ export const PositionsPage: React.FC = () => {
       )}
 
       {/* Header Section */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 md:gap-6">
         <div>
-          <div className="flex items-center gap-3 mb-2">
-            <div className="p-2 bg-blue-500/10 rounded-lg border border-blue-500/20">
-              <Activity className="text-blue-400" size={24} />
+          <div className="flex items-center gap-2 md:gap-3 mb-2">
+            <div className="p-1.5 md:p-2 bg-blue-500/10 rounded-lg border border-blue-500/20">
+              <Activity className="text-blue-400" size={20} />
             </div>
-            <span className="text-xs font-bold text-blue-400 uppercase tracking-widest">Vị thế đang hoạt động</span>
+            <span className="text-[10px] md:text-xs font-bold text-blue-400 uppercase tracking-widest">Vị thế đang hoạt động</span>
           </div>
-          <h1 className="text-5xl font-black text-gradient">Positions</h1>
-          <p className="text-slate-400 mt-2 max-w-xl">Theo dõi và quản lý dữ liệu thời gian thực các vị thế đang mở trên sàn giao dịch.</p>
+          <h1 className="text-3xl md:text-5xl font-black text-gradient">Positions</h1>
+          <p className="text-slate-400 text-sm md:text-base mt-2 max-w-xl">Theo dõi và quản lý dữ liệu thời gian thực các vị thế đang mở trên sàn giao dịch.</p>
         </div>
 
-        <div className="flex gap-4">
+        <div className="flex flex-wrap gap-2 md:gap-4 w-full md:w-auto">
           <button
             onClick={() => setIsModalOpen(true)}
-            className="btn btn-primary self-center px-6 py-4 rounded-3xl flex items-center gap-3"
+            className="btn btn-primary self-center px-4 md:px-6 py-3 md:py-4 rounded-2xl md:rounded-3xl flex items-center gap-2 md:gap-3"
           >
-            <Zap size={18} />
+            <Zap size={16} className="md:w-[18px] md:h-[18px]" />
             <span className="text-[10px] font-black uppercase tracking-widest">Mở vị thế</span>
           </button>
-          <div className="glass-dark px-6 py-4 rounded-3xl border border-white/5 shadow-2xl">
+          <div className="glass-dark px-4 md:px-6 py-3 md:py-4 rounded-2xl md:rounded-3xl border border-white/5 shadow-2xl">
             <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Số lượng vị thế</span>
-            <span className="text-2xl font-black text-white font-mono">{positions.length}</span>
+            <span className="text-xl md:text-2xl font-black text-white font-mono">{positions.length}</span>
           </div>
-          <div className={`glass-dark px-6 py-4 rounded-3xl border border-white/5 shadow-2xl relative overflow-hidden group`}>
+          <div className={`glass-dark px-4 md:px-6 py-3 md:py-4 rounded-2xl md:rounded-3xl border border-white/5 shadow-2xl relative overflow-hidden group`}>
             <div className="relative z-10">
               <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Tổng Alpha (PnL)</span>
-              <span className={`text-2xl font-black font-mono ${totalPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              <span className={`text-xl md:text-2xl font-black font-mono ${totalPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {totalPnL >= 0 ? '+' : ''}${totalPnL.toFixed(2)}
               </span>
             </div>
             <div className={`absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity ${totalPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {totalPnL >= 0 ? <TrendingUp size={60} /> : <TrendingDown size={60} />}
+              {totalPnL >= 0 ? <TrendingUp size={40} className="md:w-[60px] md:h-[60px]" /> : <TrendingDown size={40} className="md:w-[60px] md:h-[60px]" />}
             </div>
           </div>
-          <div className="flex bg-white/5 p-1 rounded-2xl border border-white/5">
+          <div className="flex bg-white/5 p-1 rounded-xl md:rounded-2xl border border-white/5">
             <button
               onClick={() => setViewMode('table')}
-              className={`p-3 rounded-xl transition-all ${viewMode === 'table' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500 hover:text-white'}`}
+              className={`p-2 md:p-3 rounded-lg md:rounded-xl transition-all ${viewMode === 'table' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500 hover:text-white'}`}
             >
-              <Grid size={18} />
+              <Grid size={16} className="md:w-[18px] md:h-[18px]" />
             </button>
             <button
               onClick={() => setViewMode('card')}
-              className={`p-3 rounded-xl transition-all ${viewMode === 'card' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500 hover:text-white'}`}
+              className={`p-2 md:p-3 rounded-lg md:rounded-xl transition-all ${viewMode === 'card' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500 hover:text-white'}`}
             >
-              <Layout size={18} />
+              <Layout size={16} className="md:w-[18px] md:h-[18px]" />
             </button>
           </div>
           <button
             onClick={() => setRefreshKey(k => k + 1)}
-            className="btn btn-secondary group self-center p-4 rounded-3xl"
+            className="btn btn-secondary group self-center p-3 md:p-4 rounded-2xl md:rounded-3xl"
           >
-            <RefreshCw size={20} className="group-hover:rotate-180 transition-transform duration-700" />
+            <RefreshCw size={18} className="md:w-5 md:h-5 group-hover:rotate-180 transition-transform duration-700" />
           </button>
         </div>
       </div>

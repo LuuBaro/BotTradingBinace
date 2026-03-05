@@ -122,10 +122,11 @@ class JWTHandler:
         """Generate a new TOTP secret"""
         return pyotp.random_base32()
 
-    def get_totp_qrcode(self, secret: str, username: str, issuer: str = "BotTrading") -> str:
+    def get_totp_qrcode(self, secret: str, username: str, issuer: str | None = None) -> str:
         """Generate QR code for TOTP setup"""
+        issuer_name = issuer or settings.app_name or "TiznDBot"
         totp = pyotp.TOTP(secret)
-        uri = totp.provisioning_uri(name=username, issuer_name=issuer)
+        uri = totp.provisioning_uri(name=username, issuer_name=issuer_name)
         
         # Generate QR code and return as base64
         qr = qrcode.QRCode(version=1, box_size=10, border=5)
@@ -309,6 +310,14 @@ class DemoUserManager:
             role=user_data["role"],
         )
 
+    def get_username_by_email(self, email: str) -> Optional[str]:
+        """Find username by email"""
+        email_normalized = (email or "").strip().lower()
+        for username, user_data in self.users.items():
+            if (user_data.get("email") or "").strip().lower() == email_normalized:
+                return username
+        return None
+
     def change_password(self, username: str, old_password: str, new_password: str) -> bool:
         """Change user password"""
         if username not in self.users:
@@ -340,6 +349,18 @@ class DemoUserManager:
         
         logger.info("password_reset_admin", username=username)
         return temp_password
+
+    def set_password(self, username: str, new_password: str) -> bool:
+        """Set new password directly (used for verified email reset flow)"""
+        if username not in self.users:
+            return False
+        if len((new_password or "").strip()) < 8:
+            return False
+
+        password_hash = self.hash_password(new_password.strip())
+        self.users[username]["password_hash"] = password_hash
+        logger.info("password_set_via_verified_reset", username=username)
+        return True
 
     def get_or_create_user(self, email: str, name: str, google_id: str) -> User:
         """Get or create user from Google OAuth"""

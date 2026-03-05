@@ -158,6 +158,11 @@ export class ApiClient {
     return res.data
   }
 
+  async logAccessTelemetry(payload: Record<string, any>) {
+    const res = await this._axiosInstance.post('access/telemetry', payload)
+    return res.data
+  }
+
   async getPnlHistory(days = 7) {
     const res = await this._axiosInstance.get(`reports/pnl-history?days=${days}`)
     return res.data
@@ -273,6 +278,38 @@ export class ApiClient {
 
   async deleteNewsSource(sourceId: number) {
     const res = await this._axiosInstance.delete(`intelligence/sources/${sourceId}`)
+    return res.data
+  }
+
+  // Message Center endpoints
+  async getMessageConversations() {
+    const res = await this._axiosInstance.get('message-center/conversations')
+    return res.data
+  }
+
+  async createMessageConversation(title?: string) {
+    const res = await this._axiosInstance.post('message-center/conversations', {
+      title,
+    })
+    return res.data
+  }
+
+  async getMessageConversationMessages(conversationId: number) {
+    const res = await this._axiosInstance.get(`message-center/conversations/${conversationId}/messages`)
+    return res.data
+  }
+
+  async askMessageCenter(question: string, conversationId?: number) {
+    const res = await this._axiosInstance.post('message-center/ask', {
+      question,
+      conversation_id: conversationId,
+      timezone_name: 'Asia/Ho_Chi_Minh',
+    })
+    return res.data
+  }
+
+  async getMessageSuggestedQuestions() {
+    const res = await this._axiosInstance.get('message-center/suggested-questions')
     return res.data
   }
 }
