@@ -214,7 +214,10 @@ Respond with ONLY valid JSON (no markdown):
             # Step 8: Create AIDecisionOutput
             decision = AIDecisionOutput(**decision_dict)
 
-            # Step 9: Additional business logic validation
+            # Step 9: Normalize decision (auto-fix common recoverable issues)
+            decision = self._normalize_decision(decision, prompt_pack)
+
+            # Step 10: Additional business logic validation
             business_errors = self._validate_business_logic(decision, prompt_pack, current_positions)
             if business_errors:
                 return {
@@ -543,6 +546,35 @@ STRICT EXECUTION RULES:
             valid=len(errors) == 0,
             errors=errors
         )
+
+    def _normalize_decision(
+        self,
+        decision: AIDecisionOutput,
+        prompt_pack: PromptPackSchema,
+    ) -> AIDecisionOutput:
+        """Normalize recoverable AI output issues to reduce avoidable hard rejections."""
+        if decision.decision_type == "ENTRY" and decision.order_spec:
+            order = decision.order_spec
+            if order.stop_loss_price and order.take_profit_prices:
+                risk = abs(order.entry_price - order.stop_loss_price)
+                if risk > 0:
+                    reward = abs(order.take_profit_prices[0] - order.entry_price)
+                    min_ratio = float(prompt_pack.risk_params.min_risk_ratio)
+                    cur_ratio = (reward / risk) if reward > 0 else 0.0
+
+                    if cur_ratio < min_ratio:
+                        side = (order.side or "BUY").upper()
+                        if side == "BUY":
+                            new_tp = order.entry_price + (risk * min_ratio)
+                        else:
+                            new_tp = order.entry_price - (risk * min_ratio)
+
+                        order.take_profit_prices[0] = round(float(new_tp), 8)
+                        decision.rationale = (
+                            f"{decision.rationale} | Auto-adjusted TP for min R/R {min_ratio:.2f}"
+                        )[:1000]
+
+        return decision
 
     def _validate_business_logic(
         self,
