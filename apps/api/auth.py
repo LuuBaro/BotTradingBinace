@@ -3,6 +3,8 @@ JWT Authentication for dashboard
 """
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
+from pathlib import Path
+import json
 import jwt
 from pydantic import BaseModel
 from google.auth.transport import requests
@@ -177,15 +179,47 @@ class DemoUserManager:
     LOCKOUT_DURATION_MINUTES = 180  # 3 hours
 
     def __init__(self):
+        # Persist auth state to disk so restart does not wipe users/2FA setup
+        self.state_file = Path("data/auth_state.json")
+
         # Setup system - only allow first-time setup
         self.setup_complete = False
         self.system_2fa_locked = False
-        
+
         # Empty users - populated via first-time setup
         self.users: Dict[str, Dict[str, Any]] = {}
-        
+
         # Track failed login attempts: {username: {attempts: int, locked_until: datetime}}
         self.failed_attempts: Dict[str, Dict[str, Any]] = {}
+
+        self._load_state()
+
+    def _load_state(self):
+        try:
+            if not self.state_file.exists():
+                return
+            raw = json.loads(self.state_file.read_text(encoding="utf-8"))
+            self.setup_complete = bool(raw.get("setup_complete", False))
+            self.system_2fa_locked = bool(raw.get("system_2fa_locked", False))
+            self.users = raw.get("users", {}) or {}
+            # failed attempts is runtime-volatile; do not persist lockouts across restarts
+            self.failed_attempts = {}
+            logger.info("auth_state_loaded", users=len(self.users), setup_complete=self.setup_complete)
+        except Exception as e:
+            logger.error("auth_state_load_failed", error=str(e))
+
+    def _save_state(self):
+        try:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "setup_complete": self.setup_complete,
+                "system_2fa_locked": self.system_2fa_locked,
+                "users": self.users,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self.state_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.error("auth_state_save_failed", error=str(e))
 
     def hash_password(self, password: str) -> str:
         """Hash password using bcrypt"""
@@ -289,7 +323,8 @@ class DemoUserManager:
         
         # Mark setup as complete
         self.setup_complete = True
-        
+        self._save_state()
+
         logger.info("first_user_created", username=username, email=email)
         return True, "Admin user created successfully"
 
@@ -334,6 +369,7 @@ class DemoUserManager:
         # Hash and store new password
         password_hash = self.hash_password(new_password)
         self.users[username]["password_hash"] = password_hash
+        self._save_state()
         logger.info("password_changed", username=username)
         return True
 
@@ -346,7 +382,8 @@ class DemoUserManager:
         temp_password = secrets.token_urlsafe(12)
         password_hash = self.hash_password(temp_password)
         self.users[username]["password_hash"] = password_hash
-        
+        self._save_state()
+
         logger.info("password_reset_admin", username=username)
         return temp_password
 
@@ -359,6 +396,7 @@ class DemoUserManager:
 
         password_hash = self.hash_password(new_password.strip())
         self.users[username]["password_hash"] = password_hash
+        self._save_state()
         logger.info("password_set_via_verified_reset", username=username)
         return True
 
@@ -391,7 +429,8 @@ class DemoUserManager:
             "backup_codes": [],
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        
+        self._save_state()
+
         logger.info("user_created_from_google", username=username, email=email)
         
         return User(
@@ -410,7 +449,8 @@ class DemoUserManager:
         self.users[username]["totp_enabled"] = True
         self.users[username]["backup_codes"] = backup_codes
         self.system_2fa_locked = True
-        
+        self._save_state()
+
         logger.info("totp_setup_completed", username=username)
         return True
 
@@ -434,6 +474,7 @@ class DemoUserManager:
             if backup_code["code"] == code and not backup_code["used"]:
                 backup_code["used"] = True
                 backup_code["used_at"] = datetime.now(timezone.utc).isoformat()
+                self._save_state()
                 logger.info("backup_code_used", username=username)
                 return True
         
@@ -447,7 +488,8 @@ class DemoUserManager:
         self.users[username]["totp_secret"] = None
         self.users[username]["totp_enabled"] = False
         self.users[username]["backup_codes"] = []
-        
+        self._save_state()
+
         logger.info("totp_reset", username=username)
         return True
 

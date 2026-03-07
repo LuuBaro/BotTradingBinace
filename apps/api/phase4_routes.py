@@ -131,13 +131,17 @@ def _send_email(subject: str, recipient: str, body: str, html_body: str | None =
         raise ValueError("Recipient email is required")
 
     if not settings.smtp_enabled:
-        logger.warning(
-            "smtp_disabled_email_not_sent",
-            recipient=recipient,
-            subject=subject,
-            body_preview=body[:200],
-        )
-        return
+        # In hardened flow, do not silently succeed when email cannot be sent.
+        # Dev OTP fallback must be explicitly enabled via ALLOW_DEV_OTP=true.
+        if os.getenv("ALLOW_DEV_OTP", "false").lower() == "true":
+            logger.warning(
+                "smtp_disabled_dev_otp_mode",
+                recipient=recipient,
+                subject=subject,
+                body_preview=body[:200],
+            )
+            return
+        raise ValueError("SMTP is not enabled. Configure SMTP or set ALLOW_DEV_OTP=true for development mode.")
 
     if not settings.smtp_host or not settings.smtp_from_email:
         raise ValueError("SMTP is enabled but SMTP_HOST/SMTP_FROM_EMAIL is not configured")
@@ -400,7 +404,7 @@ async def send_setup_email_otp(request: SendSetupEmailOTPRequest):
         "message": f"OTP has been sent to {email}",
         "expires_in_seconds": SETUP_OTP_TTL_MINUTES * 60,
     }
-    if not settings.smtp_enabled and settings.env == "demo":
+    if not settings.smtp_enabled and settings.env == "demo" and os.getenv("ALLOW_DEV_OTP", "false").lower() == "true":
         response["dev_otp"] = otp
     return response
 
@@ -948,7 +952,7 @@ async def request_password_reset_otp(request: RequestPasswordResetOTPRequest):
         "message": f"Password reset OTP has been sent to {email}",
         "expires_in_seconds": RESET_OTP_TTL_MINUTES * 60,
     }
-    if not settings.smtp_enabled and settings.env == "demo":
+    if not settings.smtp_enabled and settings.env == "demo" and os.getenv("ALLOW_DEV_OTP", "false").lower() == "true":
         response["dev_otp"] = otp
     return response
 

@@ -97,12 +97,12 @@ export const LoginPage: React.FC = () => {
 
     try {
       const api = createApiClient(getApiBaseUrl())
-      const response = await api.axiosInstance.post('auth/verify-totp-setup', {
+      await api.axiosInstance.post('auth/verify-totp-setup', {
         username: tempUsername,
         secret: secret,
         code: verificationCode.trim(),
       })
-      setBackupCodes(response.data.backup_codes)
+      // Do not block user in backup-codes step; proceed straight to login
       await verify2FA(tempUsername, verificationCode.trim())
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Mã xác thực sai')
