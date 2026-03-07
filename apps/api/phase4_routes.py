@@ -1698,7 +1698,14 @@ async def get_orders(limit: int = 100, credentials: Any = Depends(security)):
                         cfg = cfg_res.scalar_one_or_none()
                         if cfg and cfg.symbols_json:
                             import json as _json
-                            cfg_symbols = _json.loads(cfg.symbols_json).get("symbols", [])
+                            raw = cfg.symbols_json
+                            if isinstance(raw, str):
+                                parsed = _json.loads(raw)
+                            elif isinstance(raw, dict):
+                                parsed = raw
+                            else:
+                                parsed = {}
+                            cfg_symbols = parsed.get("symbols", []) if isinstance(parsed, dict) else []
                             cfg_symbols = [s for s in cfg_symbols if isinstance(s, str) and s.upper().endswith("USDT")]
                             if cfg_symbols:
                                 symbols = cfg_symbols
