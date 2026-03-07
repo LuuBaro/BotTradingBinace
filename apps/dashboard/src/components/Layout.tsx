@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { LogOut, Menu, X, Zap, Brain, Activity, Shield, Settings, Grid, History, HeartPulse, Terminal, BookOpen, User, MessagesSquare } from 'lucide-react'
+import { LogOut, Menu, X, Zap, Activity, Shield, Settings, Grid, History, HeartPulse, Terminal, BookOpen, User, MessagesSquare } from 'lucide-react'
 import { useAuthStore } from '../store'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { NotificationBell } from './NotificationBell'
@@ -79,7 +79,6 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
 
   const menuItems = [
     { path: '/', label: 'Overview', icon: <Grid size={20} /> },
-    { path: '/intel', label: 'Neural Watch', icon: <Brain size={20} /> },
     { path: '/positions', label: 'Active Zones', icon: <Activity size={20} /> },
     { path: '/orders', label: 'Order Stack', icon: <Terminal size={20} /> },
     { path: '/trade-history', label: 'Trade History', icon: <History size={20} /> },

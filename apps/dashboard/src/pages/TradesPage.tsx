@@ -10,6 +10,23 @@ export const TradesPage: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
 
+  const formatVNTime = (ts: string) => {
+    try {
+      return new Intl.DateTimeFormat('vi-VN', {
+        timeZone: 'Asia/Ho_Chi_Minh',
+        hour12: false,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }).format(new Date(ts))
+    } catch {
+      return format(new Date(ts), 'HH:mm:ss')
+    }
+  }
+
   // Memoized API client
   const token = localStorage.getItem('token') || ''
   const api = useMemo(() => createApiClient(getApiBaseUrl(), token), [token])
@@ -42,6 +59,23 @@ export const TradesPage: React.FC = () => {
       setLoading(false)
     }
   }
+
+  const dedupedTrades = useMemo(() => {
+    // Keep list natural: remove near-duplicate consecutive traces (same symbol/action/rationale in short window)
+    const out: any[] = []
+    const seen = new Map<string, number>()
+    for (const t of trades) {
+      const key = `${t.symbol || ''}|${t.action || ''}|${(t.rationale || '').slice(0, 120)}`
+      const ts = new Date(t.timestamp).getTime()
+      const prev = seen.get(key)
+      if (prev && Math.abs(ts - prev) < 5 * 60 * 1000) {
+        continue
+      }
+      seen.set(key, ts)
+      out.push(t)
+    }
+    return out
+  }, [trades])
 
   const getStatusBadge = (status: string) => {
     const s = (status || 'unknown').toLowerCase()
@@ -82,7 +116,7 @@ export const TradesPage: React.FC = () => {
               <table className="table">
                 <thead>
                   <tr className="bg-white/5">
-                    <th className="rounded-tl-xl">Time (UTC)</th>
+                    <th className="rounded-tl-xl">Time (VN)</th>
                     <th>Asset</th>
                     <th>Neural Intent</th>
                     <th className="text-right">Sizing / Lev</th>
@@ -90,7 +124,7 @@ export const TradesPage: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {trades.length === 0 ? (
+                  {dedupedTrades.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="text-center py-24">
                         <div className="flex flex-col items-center gap-4 opacity-30">
@@ -100,15 +134,15 @@ export const TradesPage: React.FC = () => {
                       </td>
                     </tr>
                   ) : (
-                    trades.map((trade) => (
+                    dedupedTrades.map((trade) => (
                       <tr
                         key={trade.id}
                         className={`cursor-pointer group transition-all duration-300 hover:bg-white/5 ${selectedTrace === trade.trace_id ? 'bg-blue-600/10 border-l-4 border-l-blue-500' : ''
                           }`}
                         onClick={() => handleViewTrace(trade.trace_id)}
                       >
-                        <td className="text-xs font-mono text-slate-500">
-                          {format(new Date(trade.timestamp), 'HH:mm:ss.SSS')}
+                        <td className="text-xs font-mono text-slate-500" title="Múi giờ Việt Nam (Asia/Ho_Chi_Minh)">
+                          {formatVNTime(trade.timestamp)}
                         </td>
                         <td className="font-black font-mono text-blue-100 italic">{trade.symbol}</td>
                         <td className="relative">
@@ -209,6 +243,35 @@ export const TradesPage: React.FC = () => {
                       </div>
                     </div>
                   </div>
+
+                  {/* Structured decision quality details */}
+                  <section className="space-y-3">
+                    <h3 className="text-[11px] font-black text-blue-400 uppercase tracking-widest">Phân tích chi tiết</h3>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="p-4 bg-white/5 rounded-xl border border-white/5">
+                        <p className="text-[10px] uppercase text-slate-500 font-bold">Entry</p>
+                        <p className="text-sm font-mono text-blue-300">{traceDetails.decision?.decision_json?.entry_price ?? 'N/A'}</p>
+                      </div>
+                      <div className="p-4 bg-white/5 rounded-xl border border-white/5">
+                        <p className="text-[10px] uppercase text-slate-500 font-bold">Stop Loss</p>
+                        <p className="text-sm font-mono text-rose-300">{traceDetails.decision?.decision_json?.stop_loss_price ?? 'N/A'}</p>
+                      </div>
+                      <div className="p-4 bg-white/5 rounded-xl border border-white/5">
+                        <p className="text-[10px] uppercase text-slate-500 font-bold">Take Profit</p>
+                        <p className="text-sm font-mono text-emerald-300">
+                          {Array.isArray(traceDetails.decision?.decision_json?.take_profit_prices)
+                            ? traceDetails.decision.decision_json.take_profit_prices.join(' | ')
+                            : 'N/A'}
+                        </p>
+                      </div>
+                      <div className="p-4 bg-white/5 rounded-xl border border-white/5">
+                        <p className="text-[10px] uppercase text-slate-500 font-bold">Đòn bẩy / Size</p>
+                        <p className="text-sm font-mono text-slate-200">
+                          {traceDetails.decision?.decision_json?.leverage ?? 1}x / {(((traceDetails.decision?.decision_json?.size_pct ?? 0) * 100)).toFixed(1)}%
+                        </p>
+                      </div>
+                    </div>
+                  </section>
 
                   {/* Action Rejection Hub - IF AWAITING APPROVAL */}
                   {traceDetails.decision.status === 'AWAITING_APPROVAL' && (
