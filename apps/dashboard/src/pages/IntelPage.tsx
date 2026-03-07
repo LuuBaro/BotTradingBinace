@@ -8,7 +8,6 @@ export const IntelPage: React.FC = () => {
     const navigate = useNavigate()
     const [signals, setSignals] = useState<any[]>([])
     const [loading, setLoading] = useState(true)
-    const [approvalMode, setApprovalMode] = useState(false)
     const [selectedSignal, setSelectedSignal] = useState<any>(null)
     const [optimizing, setOptimizing] = useState(false)
     const [optimizationResult, setOptimizationResult] = useState<any>(null)
@@ -61,8 +60,6 @@ export const IntelPage: React.FC = () => {
                 })
             }
 
-            const actionsStatus = await api.getActionsStatus()
-            setApprovalMode(actionsStatus.approval_mode || false)
         } catch (error) {
             console.error('Failed to fetch signals:', error)
             // Use default values if API fails
@@ -74,16 +71,6 @@ export const IntelPage: React.FC = () => {
             })
         } finally {
             setLoading(false)
-        }
-    }
-
-    const toggleApproval = async () => {
-        try {
-            const nextMode = !approvalMode
-            await api.updateApprovalMode(nextMode)
-            setApprovalMode(nextMode)
-        } catch (error) {
-            console.error('Failed to toggle approval mode:', error)
         }
     }
 
@@ -116,6 +103,8 @@ export const IntelPage: React.FC = () => {
         }
     }
 
+    const focusSignal = selectedSignal || (signals.length > 0 ? signals[0] : null)
+
     useEffect(() => {
         fetchSignals()
         const interval = setInterval(fetchSignals, 5000)
@@ -142,19 +131,9 @@ export const IntelPage: React.FC = () => {
                 </div>
 
                 <div className="flex flex-col items-end gap-4 p-6 glass-dark rounded-3xl border border-white/5 shadow-2xl">
-                    <div className="flex items-center gap-4">
-                        <div className="text-right">
-                            <span className="text-[10px] uppercase font-black text-slate-500 block mb-1">Chế Độ Điều Khiển</span>
-                            <span className={`text-sm font-bold uppercase ${approvalMode ? 'text-amber-400' : 'text-emerald-400'}`}>
-                                {approvalMode ? '⚠️ Chờ Phê Duyệt' : '✅ Tự Động'}
-                            </span>
-                        </div>
-                        <button
-                            onClick={toggleApproval}
-                            className={`w-14 h-7 rounded-full transition-all relative border border-white/10 ${approvalMode ? 'bg-amber-600 shadow-amber-500/20' : 'bg-emerald-600 shadow-emerald-500/20'}`}
-                        >
-                            <div className={`absolute top-1 w-5 h-5 bg-white rounded-full shadow-lg transition-all transform ${approvalMode ? 'translate-x-8' : 'translate-x-1'}`}></div>
-                        </button>
+                    <div className="text-right">
+                        <span className="text-[10px] uppercase font-black text-slate-500 block mb-1">Trạng Thái Neural Watchlist</span>
+                        <span className="text-sm font-bold uppercase text-emerald-400">✅ Đang Theo Dõi Tự Động</span>
                     </div>
                     <div className="h-px w-full bg-white/5"></div>
                     <div className="flex items-center gap-2">
@@ -291,9 +270,18 @@ export const IntelPage: React.FC = () => {
                                         Tập Trung Triển Khai
                                     </h3>
                                     <p className="text-xs text-slate-400 leading-relaxed font-medium">
-                                        {marketMetrics.deployment_focus || 'Chờ dữ liệu tín hiệu...'}
+                                        {(focusSignal?.rationale || marketMetrics.deployment_focus || 'Chờ dữ liệu tín hiệu...')}
                                     </p>
                                 </div>
+
+                                {focusSignal && (
+                                    <div className="p-5 bg-slate-950/50 rounded-2xl border border-white/10 space-y-2">
+                                        <h4 className="text-[11px] font-black uppercase tracking-widest text-slate-400">Chi tiết cụm đang chọn</h4>
+                                        <p className="text-sm text-blue-300 font-bold">{focusSignal.symbol} • {focusSignal.side === 'LONG' ? 'MUA' : 'BÁN'}</p>
+                                        <p className="text-xs text-slate-400">Xác suất: {(Number(focusSignal.probability || 0) * 100).toFixed(0)}%</p>
+                                        <p className="text-xs text-slate-400">Vùng vào lệnh: <span className="text-blue-300 font-mono">{focusSignal.entry_zone || 'N/A'}</span></p>
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -403,13 +391,14 @@ export const IntelPage: React.FC = () => {
                             <div className="flex gap-3 pt-4">
                                 <button
                                     onClick={() => {
-                                        // Could open approval/execution modal
+                                        // Execution workflow handled in dedicated trading page
                                         setSelectedSignal(null)
+                                        navigate('/trades')
                                     }}
                                     className="flex-1 btn btn-primary text-[11px] font-bold h-11 rounded-lg"
                                 >
-                                    {approvalMode ? <Shield size={16} className="inline mr-2" /> : <Zap size={16} className="inline mr-2" />}
-                                    {approvalMode ? 'Yêu Cầu Phê Duyệt' : 'Thực Hiện'}
+                                    <Zap size={16} className="inline mr-2" />
+                                    Mở Trang Thực Thi
                                 </button>
                                 <button
                                     onClick={() => setSelectedSignal(null)}

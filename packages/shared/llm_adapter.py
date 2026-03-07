@@ -241,7 +241,7 @@ class MockLLMAdapter(LLMAdapter):
         mock_decision = {
             "decision_type": "ENTRY",
             "confidence": 0.75,
-            "rationale": "Mock decision for testing - price broke above EMA20 with volume",
+            "rationale": "Tín hiệu thử nghiệm: giá vượt EMA20 kèm khối lượng tăng, ưu tiên theo dõi xác nhận động lượng.",
             "market_regime": "Trending Up",
             "timeframe_analysis": {
                 "15m": "Entry signal on pullback",
