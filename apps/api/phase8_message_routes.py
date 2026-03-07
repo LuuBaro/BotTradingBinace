@@ -10,12 +10,14 @@ from datetime import datetime, timedelta, timezone
 import json
 from typing import Any, Optional, cast
 import os
+import asyncio
 import httpx
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel, Field
 from sqlalchemy import select, desc
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.auth import jwt_handler
@@ -963,95 +965,105 @@ async def ask_message_center(request: AskRequest, credentials: Any = Depends(sec
     intent, confidence = _detect_intent(question)
 
     from packages.shared.database import AsyncSessionFactory
-    async with AsyncSessionFactory() as session:
-        # Resolve / create conversation
-        if request.conversation_id:
-            conv = await session.get(TraderConversation, request.conversation_id)
-            if not conv or conv.user_id != user.id:
-                raise HTTPException(status_code=404, detail="Conversation not found")
-        else:
-            title = question[:120]
-            conv = TraderConversation(user_id=user.id, title=title)
-            session.add(conv)
-            await session.flush()
 
-        # Store user message first
-        user_msg = TraderMessage(
-            conversation_id=conv.id,
-            role="user",
-            content=question,
-            intent=intent,
-            confidence=confidence,
-            status="ok",
-        )
-        session.add(user_msg)
-        await session.flush()
+    # SQLite can intermittently lock under concurrent UI polling + inserts.
+    # Retry a few times before returning error.
+    for attempt in range(3):
+        try:
+            async with AsyncSessionFactory() as session:
+                # Resolve / create conversation
+                if request.conversation_id:
+                    conv = await session.get(TraderConversation, request.conversation_id)
+                    if not conv or conv.user_id != user.id:
+                        raise HTTPException(status_code=404, detail="Conversation not found")
+                else:
+                    title = question[:120]
+                    conv = TraderConversation(user_id=user.id, title=title)
+                    session.add(conv)
+                    await session.flush()
 
-        # Gather factual context
-        today_start, today_end, _ = _local_day_utc_range(0)
-        y_start, y_end, _ = _local_day_utc_range(1)
-        d2_start, d2_end, _ = _local_day_utc_range(2)
+                # Store user message first
+                user_msg = TraderMessage(
+                    conversation_id=conv.id,
+                    role="user",
+                    content=question,
+                    intent=intent,
+                    confidence=confidence,
+                    status="ok",
+                )
+                session.add(user_msg)
+                await session.flush()
 
-        today_stats = await _trade_stats_between(session, today_start, today_end)
-        y_stats = await _trade_stats_between(session, y_start, y_end)
-        d2_stats = await _trade_stats_between(session, d2_start, d2_end)
-        no_trade_context = await _today_no_trade_context(session)
-        market_context = await _market_context(session)
-        system_context = await _system_context(session)
+                # Gather factual context
+                today_start, today_end, _ = _local_day_utc_range(0)
+                y_start, y_end, _ = _local_day_utc_range(1)
+                d2_start, d2_end, _ = _local_day_utc_range(2)
 
-        facts = {
-            "today_stats": today_stats,
-            "yesterday_stats": y_stats,
-            "two_days_ago_stats": d2_stats,
-            "no_trade_context": no_trade_context,
-            "market_context": market_context,
-            "system_context": system_context,
-        }
+                today_stats = await _trade_stats_between(session, today_start, today_end)
+                y_stats = await _trade_stats_between(session, y_start, y_end)
+                d2_stats = await _trade_stats_between(session, d2_start, d2_end)
+                no_trade_context = await _today_no_trade_context(session)
+                market_context = await _market_context(session)
+                system_context = await _system_context(session)
 
-        # Use AI-powered response generation
-        answer = await _generate_answer_with_llm(
-            question=question,
-            intent=intent,
-            context=facts,
-            llm_provider=system_context["llm_provider"]
-        )
-        processing_ms = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
+                facts = {
+                    "today_stats": today_stats,
+                    "yesterday_stats": y_stats,
+                    "two_days_ago_stats": d2_stats,
+                    "no_trade_context": no_trade_context,
+                    "market_context": market_context,
+                    "system_context": system_context,
+                }
 
-        assistant_msg = TraderMessage(
-            conversation_id=conv.id,
-            role="assistant",
-            content=answer,
-            intent=intent,
-            confidence=confidence,
-            status="ok",
-            processing_ms=processing_ms,
-            context_json=facts,
-        )
-        session.add(assistant_msg)
+                # Use AI-powered response generation
+                answer = await _generate_answer_with_llm(
+                    question=question,
+                    intent=intent,
+                    context=facts,
+                    llm_provider=system_context["llm_provider"]
+                )
+                processing_ms = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
 
-        conv.last_message_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        conv.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                assistant_msg = TraderMessage(
+                    conversation_id=conv.id,
+                    role="assistant",
+                    content=answer,
+                    intent=intent,
+                    confidence=confidence,
+                    status="ok",
+                    processing_ms=processing_ms,
+                    context_json=facts,
+                )
+                session.add(assistant_msg)
 
-        await session.commit()
-        await session.refresh(user_msg)
-        await session.refresh(assistant_msg)
-        await session.refresh(conv)
+                conv.last_message_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                conv.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        logger.info(
-            "message_center_answered",
-            user_id=user.id,
-            conversation_id=conv.id,
-            intent=intent,
-            processing_ms=processing_ms,
-        )
+                await session.commit()
+                await session.refresh(user_msg)
+                await session.refresh(assistant_msg)
+                await session.refresh(conv)
 
-        return AskResponse(
-            success=True,
-            conversation_id=conv.id,
-            user_message_id=user_msg.id,
-            assistant_message_id=assistant_msg.id,
-            intent=intent,
-            confidence=confidence,
-            answer=answer,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-        )
+                logger.info(
+                    "message_center_answered",
+                    user_id=user.id,
+                    conversation_id=conv.id,
+                    intent=intent,
+                    processing_ms=processing_ms,
+                )
+
+                return AskResponse(
+                    success=True,
+                    conversation_id=conv.id,
+                    user_message_id=user_msg.id,
+                    assistant_message_id=assistant_msg.id,
+                    intent=intent,
+                    confidence=confidence,
+                    answer=answer,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                )
+        except OperationalError as e:
+            if "database is locked" in str(e).lower() and attempt < 2:
+                await asyncio.sleep(0.2 * (attempt + 1))
+                continue
+            raise
