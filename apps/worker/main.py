@@ -710,15 +710,33 @@ class TradingWorker:
                         checklist=[] # Can be populated from ai_decision.checklist_results if needed
                     )
 
+                    # Promote overly-passive HOLD to cautious ENTRY when confidence/regime are strong
+                    if (
+                        decision.action == ActionType.HOLD
+                        and decision.confidence >= 0.6
+                        and decision.regime in (MarketRegime.TREND, MarketRegime.BREAKOUT)
+                        and symbol not in db_positions
+                    ):
+                        decision.action = ActionType.OPEN
+                        decision.side = Side.LONG if decision.regime == MarketRegime.TREND else Side.SHORT
+                        decision.entry_price = snapshot.close
+                        if decision.side == Side.LONG:
+                            decision.stop_loss = snapshot.close * 0.995
+                            decision.take_profit = snapshot.close * 1.009
+                        else:
+                            decision.stop_loss = snapshot.close * 1.005
+                            decision.take_profit = snapshot.close * 0.991
+                        decision.rationale = f"{decision.rationale} | auto-entry policy applied"
+
                     # Step 3: Save decision to database
                     decision_record = DecisionModel(
                         timestamp=datetime.utcnow(),
                         trace_id=trace_id,
                         decision_json=_serialize(ai_decision.model_dump()),
-                        confidence=ai_decision.confidence,
-                        regime=ai_decision.market_regime,
-                        decision_type=ai_decision.decision_type.value if hasattr(ai_decision.decision_type, 'value') else str(ai_decision.decision_type),
-                        rationale=ai_decision.rationale,
+                        confidence=decision.confidence,
+                        regime=decision.regime.value if hasattr(decision.regime, 'value') else str(decision.regime),
+                        decision_type=("ENTRY" if decision.action == ActionType.OPEN else "EXIT" if decision.action == ActionType.CLOSE else "NO_TRADE"),
+                        rationale=decision.rationale,
                         market_snapshot=snapshot_dict,
                         checklist_results=_serialize([c.model_dump() for c in ai_decision.checklist_results]),
                         status="PENDING",
