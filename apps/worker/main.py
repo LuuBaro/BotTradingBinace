@@ -17,7 +17,7 @@ import sys
 import uuid
 import random
 from datetime import datetime, timedelta
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, update
 from packages.shared.config import settings
 from packages.shared.database import AsyncSessionFactory, init_db, close_db
 from packages.shared.models import (
@@ -334,6 +334,9 @@ class TradingWorker:
 
                 # Reconcile exchange positions with database
                 await self.reconciler.sync_positions(session)
+
+                # Expire old signals before generating new watchlist entries
+                await self._expire_stale_signals(session)
                 
                 # Get current positions from DB to share with AI
                 positions_result = await session.execute(select(Position))
@@ -710,6 +713,35 @@ class TradingWorker:
                     session.add(decision_record)
                     await session.flush()
 
+                    # Persist/refresh Neural Watchlist signal for actionable decisions
+                    if decision.action != ActionType.HOLD:
+                        signal_side = "LONG"
+                        if decision.side == Side.SHORT:
+                            signal_side = "SHORT"
+                        elif decision.side == Side.LONG:
+                            signal_side = "LONG"
+                        elif symbol in db_positions:
+                            # Fallback to current position side when AI omits explicit side
+                            signal_side = str(db_positions[symbol].side).upper()
+
+                        entry_price_val = decision.entry_price or snapshot.close
+                        if entry_price_val and entry_price_val > 0:
+                            low = entry_price_val * 0.999
+                            high = entry_price_val * 1.001
+                            entry_zone = f"{low:.4f}-{high:.4f}"
+                        else:
+                            entry_zone = f"{snapshot.close:.4f}-{snapshot.close:.4f}"
+
+                        await self._upsert_active_signal(
+                            session,
+                            symbol=symbol,
+                            side=signal_side,
+                            probability=float(decision.confidence or 0.5),
+                            rationale=decision.rationale or "AI signal",
+                            entry_zone=entry_zone,
+                            ttl_minutes=30,
+                        )
+
                     if decision.action != ActionType.HOLD:
                         # Fetch balance and current positions for risk validation
                         balance_info = await self.exchange.get_account_balance() if self.is_binance else await self.exchange.get_balance()
@@ -746,6 +778,7 @@ class TradingWorker:
                                 if execution_result.get("status") == "success":
                                     decision_record.status = "EXECUTED"
                                     decision_record.order_id = str(execution_result.get("order_id"))
+                                    await self._mark_active_signals_triggered(session, symbol)
                                     logger.info(f"Executed {decision.action} for {symbol}", trace_id=trace_id)
                                 else:
                                     decision_record.status = "FAILED"
@@ -767,6 +800,70 @@ class TradingWorker:
             except Exception as e:
                 logger.error("worker_loop_iteration_error", error=str(e), exc_info=True)
                 await session.rollback()
+
+    async def _upsert_active_signal(
+        self,
+        session,
+        *,
+        symbol: str,
+        side: str,
+        probability: float,
+        rationale: str,
+        entry_zone: str,
+        ttl_minutes: int = 30,
+    ) -> None:
+        """Create or refresh one ACTIVE signal per symbol for Neural Watchlist."""
+        now = datetime.utcnow()
+        expires_at = now + timedelta(minutes=ttl_minutes)
+
+        existing_res = await session.execute(
+            select(SignalModel)
+            .where(SignalModel.symbol == symbol)
+            .where(SignalModel.status == "ACTIVE")
+            .order_by(desc(SignalModel.timestamp))
+            .limit(1)
+        )
+        existing = existing_res.scalar_one_or_none()
+
+        if existing:
+            existing.timestamp = now
+            existing.side = side
+            existing.probability = max(0.0, min(1.0, float(probability)))
+            existing.rationale = rationale[:1000]
+            existing.entry_zone = entry_zone[:50]
+            existing.expires_at = expires_at
+        else:
+            session.add(
+                SignalModel(
+                    timestamp=now,
+                    symbol=symbol,
+                    side=side,
+                    probability=max(0.0, min(1.0, float(probability))),
+                    rationale=rationale[:1000],
+                    entry_zone=entry_zone[:50],
+                    status="ACTIVE",
+                    expires_at=expires_at,
+                )
+            )
+
+    async def _mark_active_signals_triggered(self, session, symbol: str) -> None:
+        """Mark ACTIVE signals as TRIGGERED once execution succeeds."""
+        await session.execute(
+            update(SignalModel)
+            .where(SignalModel.symbol == symbol)
+            .where(SignalModel.status == "ACTIVE")
+            .values(status="TRIGGERED")
+        )
+
+    async def _expire_stale_signals(self, session) -> None:
+        """Expire stale active signals by TTL."""
+        await session.execute(
+            update(SignalModel)
+            .where(SignalModel.status == "ACTIVE")
+            .where(SignalModel.expires_at.is_not(None))
+            .where(SignalModel.expires_at < datetime.utcnow())
+            .values(status="EXPIRED")
+        )
 
     def _build_ai_symbol_plan(self, symbols: list[str], db_positions: dict[str, Position]) -> list[str]:
         """Build symbol list for full AI analysis in this loop.

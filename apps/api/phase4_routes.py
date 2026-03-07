@@ -2041,8 +2041,13 @@ async def get_signals(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     async with AsyncSessionFactory() as session:
+        now = datetime.utcnow()
         result = await session.execute(
-            select(Signal).where(Signal.status == "ACTIVE").order_by(desc(Signal.timestamp)).limit(limit)
+            select(Signal)
+            .where(Signal.status == "ACTIVE")
+            .where((Signal.expires_at.is_(None)) | (Signal.expires_at > now))
+            .order_by(desc(Signal.timestamp))
+            .limit(limit)
         )
         signals = result.scalars().all()
 
