@@ -194,7 +194,15 @@ Respond with ONLY valid JSON (no markdown):
             if not decision_dict:
                 return self._error_response(f"Failed to parse LLM response: {raw_response[:200]}")
 
-            # Step 7: Validate against schema
+            # Step 7: Sanitize optional fields that local models may emit as null
+            if decision_dict.get("risk_assessment") is None:
+                decision_dict["risk_assessment"] = {}
+            if decision_dict.get("timeframe_analysis") is None:
+                decision_dict["timeframe_analysis"] = {}
+            if decision_dict.get("checklist_results") is None:
+                decision_dict["checklist_results"] = []
+
+            # Step 8: Validate against schema
             validation_result = self._validate_decision(decision_dict, prompt_pack)
             if not validation_result.valid:
                 errors = [
