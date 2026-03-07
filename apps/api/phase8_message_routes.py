@@ -221,16 +221,19 @@ Ngữ cảnh giao dịch hiện tại (Vietnam time):
 
     # Build intent-specific prompt
     if intent == "why_no_trade":
+        nt = no_trade_context
         prompt = f"""Nhân viên giao dịch hỏi: "{question}"
 
 {context_str}
 
-Hãy phân tích và giải thích bằng tiếng Việt:
-1. Tại sao hôm nay lệnh giao dịch ít hoặc không có?
-2. Những yếu tố nào đang ảnh hưởng (điều kiện thị trường, risk, tín hiệu)?
-3. Chiến lược của bot đang chờ gì?
+Top lý do NO_TRADE hôm nay (thực tế): {nt.get('top_no_trade_reasons', [])}
+Top lý do bị risk chặn: {nt.get('top_risk_reasons', [])}
 
-Trả lời ngắn gọn (3-4 câu), chuyên nghiệp, dựa vào dữ liệu thực tế không phải giả định."""
+Hãy trả lời NGẮN (tối đa 4 câu), đi thẳng vào:
+1) nguyên nhân chính bot chưa vào lệnh,
+2) điều kiện nào cần xảy ra để vào lệnh,
+3) 1 đề xuất hành động ngay bây giờ.
+Không chung chung, không JSON."""
 
     elif intent == "ai_system_explain":
         sy = system_context
@@ -346,8 +349,8 @@ async def _generate_freeform_answer(prompt: str, llm_provider: str) -> tuple[str
     system_prompt = (
         "Bạn là AI trợ lý vận hành trading. "
         "Luôn trả lời bằng tiếng Việt có dấu, tự nhiên như tư vấn viên chuyên nghiệp. "
-        "Ưu tiên rõ ràng, ngắn gọn, bám sát dữ liệu. "
-        "Tuyệt đối không trả về JSON, không code block."
+        "Ưu tiên câu trả lời NGẮN GỌN (3-5 câu), trọng tâm, bám sát dữ liệu thực tế trong ngữ cảnh. "
+        "Tuyệt đối không trả về JSON, không code block, không nói chung chung."
     )
 
     if provider in ("openai", "groq", "local"):
@@ -467,7 +470,8 @@ async def _today_no_trade_context(db: AsyncSession) -> dict[str, Any]:
     )
     risk_logs = risk_result.scalars().all()
 
-    no_trade_count = sum(1 for d in decisions if (d.decision_type or "").upper() == "NO_TRADE")
+    no_trade_decisions = [d for d in decisions if (d.decision_type or "").upper() == "NO_TRADE"]
+    no_trade_count = len(no_trade_decisions)
     rejected_count = sum(1 for d in decisions if (d.status or "").upper() == "REJECTED")
     approved_count = sum(1 for d in decisions if (d.status or "").upper() in ["APPROVED", "EXECUTED"])
 
@@ -477,6 +481,12 @@ async def _today_no_trade_context(db: AsyncSession) -> dict[str, Any]:
         if (r.result or "").lower() == "rejected"
     ).most_common(3)
 
+    top_no_trade_reasons = Counter(
+        (d.rationale or "Không rõ lý do").strip()[:160]
+        for d in no_trade_decisions
+        if (d.rationale or "").strip()
+    ).most_common(3)
+
     return {
         "decisions_total": len(decisions),
         "no_trade_count": no_trade_count,
@@ -484,6 +494,7 @@ async def _today_no_trade_context(db: AsyncSession) -> dict[str, Any]:
         "approved_count": approved_count,
         "risk_rejected_count": sum(1 for r in risk_logs if (r.result or "").lower() == "rejected"),
         "top_risk_reasons": top_risk_reasons,
+        "top_no_trade_reasons": top_no_trade_reasons,
     }
 
 
@@ -747,13 +758,20 @@ def _build_answer_template(intent: str, question: str, facts: dict[str, Any]) ->
         explanation_lines.append(f"• Total: {nt['decisions_total']} | NO_TRADE: {nt['no_trade_count']} | REJECTED: {nt['rejected_count']}")
         
         # Conclusion
-        explanation_lines.append(f"\n✓ Kết luận:")
+        # Add top concrete NO_TRADE reasons from decision logs
+        if nt.get('top_no_trade_reasons'):
+            explanation_lines.append(f"\n🧠 Lý do NO_TRADE nổi bật:")
+            for reason, count in nt['top_no_trade_reasons'][:2]:
+                explanation_lines.append(f"• {reason} ({count}x)")
+
+        explanation_lines.append(f"\n✓ Kết luận ngắn:")
         if m['signals_total'] < 3:
-            explanation_lines.append(f"Thị trường yên tĩnh, chiến lược của bạn đang chờ setup tối ưu.")
-        if nt['risk_rejected_count'] > nt['decisions_total'] * 0.5:
-            explanation_lines.append(f"Risk filter đang giữ kỷ luật, bảo vệ vốn của bạn.")
-        
-        return "\n".join(explanation_lines)
+            explanation_lines.append(f"Thị trường yên, bot đang chờ setup rõ ràng hơn.")
+        if nt['risk_rejected_count'] > 0 and nt['risk_rejected_count'] > max(1, nt['decisions_total'] * 0.4):
+            explanation_lines.append(f"Risk filter đang chặn nhiều để bảo vệ vốn.")
+
+        # Keep concise for user-facing chat
+        return "\n".join(explanation_lines[:12])
 
     if intent == "market_status":
         m = facts["market_context"]
