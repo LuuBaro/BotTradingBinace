@@ -1687,13 +1687,24 @@ async def get_orders(limit: int = 100, credentials: Any = Depends(security)):
                 client.session = session
                 await client.sync_server_time()
                 
-                # List of symbols to monitor
-                symbols = [
-                    "BTCUSDT", "ETHUSDT", "LINKUSDT", "XRPUSDT", 
-                    "DOTUSDT", "UNIUSDT", "DOGEUSDT", "SOLUSDT", 
-                    "ADAUSDT", "MATICUSDT", "AVAXUSDT"
-                ]
-                
+                # Get symbols from active bot config (fallback to safe core set)
+                symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+                try:
+                    from packages.shared.models import BotConfig
+                    async with AsyncSessionFactory() as cfg_session:
+                        cfg_res = await cfg_session.execute(
+                            select(BotConfig).where(BotConfig.is_active == True).order_by(desc(BotConfig.id)).limit(1)
+                        )
+                        cfg = cfg_res.scalar_one_or_none()
+                        if cfg and cfg.symbols_json:
+                            import json as _json
+                            cfg_symbols = _json.loads(cfg.symbols_json).get("symbols", [])
+                            cfg_symbols = [s for s in cfg_symbols if isinstance(s, str) and s.upper().endswith("USDT")]
+                            if cfg_symbols:
+                                symbols = cfg_symbols
+                except Exception as _cfg_e:
+                    logger.warning("orders_symbol_config_fallback", error=str(_cfg_e))
+
                 tasks = [client.get_all_orders(s, limit=limit) for s in symbols]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 
@@ -1702,7 +1713,11 @@ async def get_orders(limit: int = 100, credentials: Any = Depends(security)):
                     if isinstance(res, list):
                         all_binance_orders.extend(res)
                     elif isinstance(res, Exception):
-                        logger.error("fetching_orders_for_symbol_failed", error=str(res))
+                        err = str(res)
+                        if "Symbol is closed" in err or "-4141" in err:
+                            logger.info("orders_symbol_closed_skipped", error=err)
+                        else:
+                            logger.error("fetching_orders_for_symbol_failed", error=err)
                 
                 for o in all_binance_orders:
                     side_val = o.get("positionSide", o["side"])
