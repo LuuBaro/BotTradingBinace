@@ -27,7 +27,8 @@ from packages.shared.models import (
     Position, 
     Signal as SignalModel,
     Event,
-    Event as EventModel
+    Event as EventModel,
+    PromptPack,
 )
 from packages.shared.schemas import RiskConfig, MarketSnapshot, Decision as DecisionSchema
 from packages.shared.enums import ActionType, Side, MarketRegime
@@ -130,33 +131,46 @@ class TradingWorker:
                 self.trader_context = latest_context.prompt
                 logger.info("trader_context_loaded", trader=latest_context.trader_name)
 
-            # 3. Load or Create Default Prompt Pack
-            # In Phase 5+, we use AIOrchestrator
-            self.prompt_pack = PromptPackSchema(
-                name="Neural Default Strategy",
-                symbols=self.symbols_to_monitor,
-                timeframe=TimeFrame.HOUR_1,
-                regimes=[
-                    RegimeDefinition(name="Trending Up", indicators={"EMA_20 > EMA_50": True}, description="Price trending upwards"),
-                    RegimeDefinition(name="Range Bound", indicators={"RSI": "between 40 and 60"}, description="Market consolidates"),
-                    RegimeDefinition(name="Trending Down", indicators={"EMA_20 < EMA_50": True}, description="Price trending downwards")
-                ],
-                entry_playbooks=[
-                    EntryPlaybook(side="LONG", regime="Trending Up", conditions=["Price > EMA_20", "RSI > 50"], target_ratio=2.0),
-                    EntryPlaybook(side="SHORT", regime="Trending Down", conditions=["Price < EMA_20", "RSI < 40"], target_ratio=2.0)
-                ],
-                exit_playbooks=[
-                    ExitPlaybook(side="LONG", profit_target="2:1 ratio or RSI overbought", stop_loss="Below recent swing low"),
-                    ExitPlaybook(side="SHORT", profit_target="2:1 ratio or RSI oversold", stop_loss="Above recent swing high")
-                ],
-                min_analysis_confidence=0.6,
-                risk_params={
-                    "max_position_pct": risk_config.max_position_pct * 100, # PromptPack uses % (1-100)
-                    "max_leverage": risk_config.max_leverage,
-                    "min_risk_ratio": 1.5,
-                    "max_concurrent_positions": risk_config.max_concurrent_positions
-                }
-            )
+            # 3. Load Prompt Pack from DB if configured, else use default
+            self.prompt_pack = None
+            try:
+                if bot_config and bot_config.active_prompt_pack_id:
+                    pp_result = await session.execute(
+                        select(PromptPack).where(PromptPack.id == bot_config.active_prompt_pack_id)
+                    )
+                    active_pack = pp_result.scalar_one_or_none()
+                    if active_pack and active_pack.content_json:
+                        self.prompt_pack = PromptPackSchema.model_validate(active_pack.content_json)
+                        logger.info("prompt_pack_loaded_from_db", prompt_pack_id=active_pack.id, name=active_pack.name)
+            except Exception as e:
+                logger.warning("prompt_pack_load_failed_fallback_default", error=str(e))
+
+            if self.prompt_pack is None:
+                self.prompt_pack = PromptPackSchema(
+                    name="Neural Default Strategy",
+                    symbols=self.symbols_to_monitor,
+                    timeframe=TimeFrame.HOUR_1,
+                    regimes=[
+                        RegimeDefinition(name="Trending Up", indicators={"EMA_20 > EMA_50": True}, description="Price trending upwards"),
+                        RegimeDefinition(name="Range Bound", indicators={"RSI": "between 40 and 60"}, description="Market consolidates"),
+                        RegimeDefinition(name="Trending Down", indicators={"EMA_20 < EMA_50": True}, description="Price trending downwards")
+                    ],
+                    entry_playbooks=[
+                        EntryPlaybook(side="LONG", regime="Trending Up", conditions=["Price > EMA_20", "RSI > 50"], target_ratio=1.7),
+                        EntryPlaybook(side="SHORT", regime="Trending Down", conditions=["Price < EMA_20", "RSI < 45"], target_ratio=1.7)
+                    ],
+                    exit_playbooks=[
+                        ExitPlaybook(side="LONG", profit_target="RR >= 1.7 or momentum weakens", stop_loss="Below recent swing low"),
+                        ExitPlaybook(side="SHORT", profit_target="RR >= 1.7 or momentum weakens", stop_loss="Above recent swing high")
+                    ],
+                    min_analysis_confidence=0.55,
+                    risk_params={
+                        "max_position_pct": risk_config.max_position_pct * 100, # PromptPack uses % (1-100)
+                        "max_leverage": risk_config.max_leverage,
+                        "min_risk_ratio": 1.5,
+                        "max_concurrent_positions": risk_config.max_concurrent_positions
+                    }
+                )
             
             # Initialize LLM Adapters
             ai_mode = settings.worker_ai_mode or "two_tier_hybrid"
