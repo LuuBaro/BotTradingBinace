@@ -119,7 +119,25 @@ class TradingWorker:
             else:
                 risk_config = RiskConfig(**bot_config.risk_json)
                 logger.info("risk_config_loaded", version=bot_config.version)
-            
+
+                # Load symbols from active bot config to avoid out-of-strategy scans
+                try:
+                    import json as _json
+                    raw = bot_config.symbols_json
+                    if isinstance(raw, str):
+                        parsed = _json.loads(raw)
+                    elif isinstance(raw, dict):
+                        parsed = raw
+                    else:
+                        parsed = {}
+                    cfg_symbols = parsed.get("symbols", []) if isinstance(parsed, dict) else []
+                    cfg_symbols = [s.upper() for s in cfg_symbols if isinstance(s, str) and s.upper().endswith("USDT")]
+                    if cfg_symbols:
+                        self.symbols_to_monitor = cfg_symbols
+                        logger.info("symbols_loaded_from_bot_config", symbols=self.symbols_to_monitor)
+                except Exception as e:
+                    logger.warning("symbols_config_parse_failed", error=str(e))
+
             self.risk_engine = RiskEngine(risk_config)
 
             # 2. Load latest Trader Context (Human Expertise)
