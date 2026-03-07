@@ -363,10 +363,19 @@ class BinanceFuturesClient:
         result = await self._request("GET", "/fapi/v1/allOrders", params=params, signed=True)
         return result
 
-    async def get_user_trades(self, symbol: str, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get user's trade history for a specific symbol"""
-        params = {"symbol": symbol, "limit": limit}
-        result = await self._request("GET", "/fapi/v1/userTrades", params=params, signed=True)
+    async def get_user_trades(self, symbol: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get user trade history.
+
+        - If symbol is provided: use `/fapi/v1/userTrades`.
+        - If symbol is None: use realized PnL income feed as an all-symbol fallback.
+        """
+        if symbol:
+            params = {"symbol": symbol, "limit": limit}
+            result = await self._request("GET", "/fapi/v1/userTrades", params=params, signed=True)
+            return result
+
+        params = {"incomeType": "REALIZED_PNL", "limit": limit}
+        result = await self._request("GET", "/fapi/v1/income", params=params, signed=True)
         return result
 
     # === Market data endpoints ===
