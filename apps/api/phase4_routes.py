@@ -2029,13 +2029,21 @@ async def get_decision_trace(
         )
         events = result.scalars().all()
 
+        parsed_decision_json = decision.decision_json
+        try:
+            if isinstance(parsed_decision_json, str):
+                parsed_decision_json = json.loads(parsed_decision_json)
+        except Exception:
+            # keep raw payload for debugging if malformed
+            pass
+
         return {
             "trace_id": trace_id,
             "decision": {
                 "id": decision.id,
                 "timestamp": decision.timestamp.isoformat(),
                 "trace_id": decision.trace_id,
-                "decision_json": decision.decision_json,
+                "decision_json": parsed_decision_json,
                 "confidence": float(decision.confidence),
                 "regime": decision.regime,
                 "status": decision.status,
