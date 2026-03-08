@@ -991,10 +991,31 @@ class TradingWorker:
             ex_symbols = [s for s in ex_symbols if s]
             ex_symbols = sorted(set(ex_symbols))
 
+            # Prefilter by liquidity/volatility using 24h ticker stats
+            ranked_symbols = ex_symbols
+            try:
+                tickers = await self.exchange.get_24h_tickers()
+                score = {}
+                for t in tickers:
+                    sym = str(t.get("symbol", "")).upper()
+                    if sym not in ex_symbols:
+                        continue
+                    try:
+                        quote_vol = float(t.get("quoteVolume", 0.0))
+                        move_pct = abs(float(t.get("priceChangePercent", 0.0)))
+                        # weighted score: liquidity first, then movement
+                        score[sym] = (quote_vol * 0.7) + (move_pct * 0.3 * 1_000_000)
+                    except Exception:
+                        continue
+                if score:
+                    ranked_symbols = sorted(score.keys(), key=lambda s: score[s], reverse=True)
+            except Exception as e:
+                logger.warning("symbol_prefilter_24h_failed", error=str(e))
+
             # Keep bounded universe for CPU/GPU stability
             # Tie ALL-universe size to ai loop capacity (avoid overloading local runner)
             max_universe = max(8, settings.worker_ai_max_symbols_per_loop * 4)
-            resolved = ex_symbols[:max_universe] if ex_symbols else [
+            resolved = ranked_symbols[:max_universe] if ranked_symbols else [
                 "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT"
             ]
 

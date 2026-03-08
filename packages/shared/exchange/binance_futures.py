@@ -386,6 +386,11 @@ class BinanceFuturesClient:
         result = await self._request("GET", "/fapi/v1/ticker/price", params=params, signed=False)
         return result
 
+    async def get_24h_tickers(self) -> List[Dict[str, Any]]:
+        """Get 24h stats for all futures symbols."""
+        result = await self._request("GET", "/fapi/v1/ticker/24hr", signed=False)
+        return result if isinstance(result, list) else []
+
     async def get_mark_price(self, symbol: str) -> Dict[str, Any]:
         """Get mark price for symbol"""
         params = {"symbol": symbol}
