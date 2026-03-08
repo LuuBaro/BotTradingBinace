@@ -88,6 +88,10 @@ class TradingWorker:
         self._ai_global_cooldown_until: datetime | None = None
         self._ai_symbol_cooldown_until: dict[str, datetime] = {}
 
+        # Symbol universe cache for ALL-mode (avoid heavy exchangeInfo calls each loop)
+        self._symbol_universe_cache: list[str] = []
+        self._symbol_universe_cached_at: datetime | None = None
+
     async def initialize(self) -> None:
         """Initialize worker"""
         logger.info("worker_initializing")
@@ -352,7 +356,7 @@ class TradingWorker:
 
     async def _execute_loop_iteration(self) -> None:
         """Execute one iteration of the trading loop for all configured symbols"""
-        symbols = self.symbols_to_monitor
+        symbols = await self._resolve_symbols_for_loop()
         
         async with AsyncSessionFactory() as session:
             try:
@@ -363,6 +367,10 @@ class TradingWorker:
                     return _json.loads(
                         _json.dumps(obj, default=lambda o: o.isoformat() if hasattr(o, 'isoformat') else str(o))
                     )
+
+                # Keep prompt-pack symbol universe aligned with active runtime symbols
+                if self.prompt_pack is not None:
+                    self.prompt_pack.symbols = symbols
 
                 # Reconcile exchange positions with database
                 await self.reconciler.sync_positions(session)
@@ -914,6 +922,46 @@ class TradingWorker:
             .where(SignalModel.expires_at < datetime.utcnow())
             .values(status="EXPIRED")
         )
+
+    async def _resolve_symbols_for_loop(self) -> list[str]:
+        """Resolve symbol universe. Supports ALL-mode with cached Binance futures symbols."""
+        symbols = [s.upper() for s in self.symbols_to_monitor]
+        if "ALL" not in symbols:
+            return symbols
+
+        now = datetime.utcnow()
+        if self._symbol_universe_cache and self._symbol_universe_cached_at:
+            if (now - self._symbol_universe_cached_at).total_seconds() < 1800:
+                return self._symbol_universe_cache
+
+        try:
+            info = await self.exchange.get_exchange_info() if self.is_binance else None
+            ex_symbols = []
+            if isinstance(info, dict):
+                for s in info.get("symbols", []):
+                    if (
+                        s.get("contractType") == "PERPETUAL"
+                        and s.get("quoteAsset") == "USDT"
+                        and s.get("status") == "TRADING"
+                    ):
+                        ex_symbols.append(str(s.get("symbol", "")).upper())
+
+            ex_symbols = [s for s in ex_symbols if s]
+            ex_symbols = sorted(set(ex_symbols))
+
+            # Keep bounded universe for CPU/GPU stability
+            max_universe = max(30, settings.worker_ai_max_symbols_per_loop * 8)
+            resolved = ex_symbols[:max_universe] if ex_symbols else [
+                "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT"
+            ]
+
+            self._symbol_universe_cache = resolved
+            self._symbol_universe_cached_at = now
+            logger.info("symbol_universe_resolved", mode="ALL", count=len(resolved))
+            return resolved
+        except Exception as e:
+            logger.warning("symbol_universe_resolve_failed", error=str(e))
+            return ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
     def _build_ai_symbol_plan(self, symbols: list[str], db_positions: dict[str, Position]) -> list[str]:
         """Build symbol list for full AI analysis in this loop.
