@@ -805,6 +805,7 @@ class TradingWorker:
 
                     # Persist/refresh Neural Watchlist signal for actionable decisions
                     if decision.action != ActionType.HOLD:
+                        loop_metrics["entry_candidates"] += 1
                         signal_side = "LONG"
                         if decision.side == Side.SHORT:
                             signal_side = "SHORT"
