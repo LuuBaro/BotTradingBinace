@@ -754,6 +754,38 @@ class TradingWorker:
                             decision.take_profit = snapshot.close * 0.991
                         decision.rationale = f"{decision.rationale} | auto-entry policy applied"
 
+                    # Deterministic fallback when local AI is too conservative (NO_TRADE loops)
+                    if decision.action == ActionType.HOLD and symbol not in db_positions:
+                        ind = snapshot.indicators or {}
+                        ema20 = ind.get("ema_20") or ind.get("EMA_20") or ind.get("ema20")
+                        ema50 = ind.get("ema_50") or ind.get("EMA_50") or ind.get("ema50")
+                        rsi = ind.get("rsi") or ind.get("RSI")
+                        try:
+                            ema20 = float(ema20) if ema20 is not None else None
+                            ema50 = float(ema50) if ema50 is not None else None
+                            rsi = float(rsi) if rsi is not None else None
+                        except Exception:
+                            ema20 = ema50 = rsi = None
+
+                        if ema20 and ema50 and rsi is not None:
+                            long_ok = snapshot.close > ema20 > ema50 and rsi >= 52
+                            short_ok = snapshot.close < ema20 < ema50 and rsi <= 48
+
+                            if long_ok or short_ok:
+                                decision.action = ActionType.OPEN
+                                decision.side = Side.LONG if long_ok else Side.SHORT
+                                decision.confidence = max(float(decision.confidence or 0.0), 0.56)
+                                decision.entry_price = snapshot.close
+                                if decision.side == Side.LONG:
+                                    decision.stop_loss = snapshot.close * 0.995
+                                    decision.take_profit = snapshot.close * 1.008
+                                else:
+                                    decision.stop_loss = snapshot.close * 1.005
+                                    decision.take_profit = snapshot.close * 0.992
+                                decision.rationale = (
+                                    f"Fallback entry: EMA20/EMA50 trend + RSI confirm ({'LONG' if long_ok else 'SHORT'})"
+                                )
+
                     # Step 3: Save decision to database
                     decision_record = DecisionModel(
                         timestamp=datetime.utcnow(),
