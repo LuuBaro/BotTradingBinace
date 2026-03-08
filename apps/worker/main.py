@@ -756,7 +756,7 @@ class TradingWorker:
 
                     # Deterministic fallback when local AI is too conservative (NO_TRADE loops)
                     if decision.action == ActionType.HOLD and symbol not in db_positions:
-                        ind = snapshot.indicators or {}
+                        ind = getattr(snapshot, "indicators", None) or {}
                         ema20 = ind.get("ema_20") or ind.get("EMA_20") or ind.get("ema20")
                         ema50 = ind.get("ema_50") or ind.get("EMA_50") or ind.get("ema50")
                         rsi = ind.get("rsi") or ind.get("RSI")
@@ -844,6 +844,16 @@ class TradingWorker:
                             {"symbol": p.symbol, "side": p.side, "qty": p.qty}
                             for p in latest_positions
                         ]
+
+                        # Normalize position size to configured cap before risk validation
+                        try:
+                            max_pos = float(getattr(self.risk_engine.config, "max_position_pct", 0.08))
+                            if decision.size_pct is None or decision.size_pct <= 0:
+                                decision.size_pct = min(0.02, max_pos)
+                            elif decision.size_pct > max_pos:
+                                decision.size_pct = max_pos
+                        except Exception:
+                            pass
 
                         # Risk Validation
                         risk_result = await self.risk_engine.validate_decision(
