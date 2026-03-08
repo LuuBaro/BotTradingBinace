@@ -10,6 +10,13 @@ export const TradesPage: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
 
+  const parseUTC = (ts?: string) => {
+    if (!ts) return new Date()
+    // DB sometimes stores naive UTC strings without timezone suffix.
+    const hasZone = /[zZ]|[+-]\d{2}:?\d{2}$/.test(ts)
+    return new Date(hasZone ? ts : `${ts}Z`)
+  }
+
   const formatVNTime = (ts: string) => {
     try {
       return new Intl.DateTimeFormat('vi-VN', {
@@ -21,10 +28,28 @@ export const TradesPage: React.FC = () => {
         hour: '2-digit',
         minute: '2-digit',
         second: '2-digit',
-      }).format(new Date(ts))
+      }).format(parseUTC(ts))
     } catch {
-      return format(new Date(ts), 'HH:mm:ss')
+      return format(parseUTC(ts), 'HH:mm:ss')
     }
+  }
+
+  const viRegime = (regime?: string) => {
+    const r = (regime || '').toUpperCase()
+    if (r.includes('TREND')) return 'XU HƯỚNG'
+    if (r.includes('BREAKOUT')) return 'PHÁ VỠ'
+    if (r.includes('RANGE')) return 'ĐI NGANG'
+    return regime || 'KHÔNG RÕ'
+  }
+
+  const viRationale = (text?: string) => {
+    if (!text) return 'Chưa có phân tích chi tiết.'
+    return text
+      .replace('No open positions and current symbol', 'Không có vị thế mở và mã hiện tại')
+      .replace('does not match the valid symbols', 'không nằm trong danh sách mã hợp lệ')
+      .replace('in the strategy', 'theo cấu hình chiến lược')
+      .replace('Market conditions do not match', 'Điều kiện thị trường chưa phù hợp')
+      .replace('No clear trend', 'Chưa có xu hướng rõ ràng')
   }
 
   // Memoized API client
@@ -66,7 +91,7 @@ export const TradesPage: React.FC = () => {
     const seen = new Map<string, number>()
     for (const t of trades) {
       const key = `${t.symbol || ''}|${t.action || ''}|${(t.rationale || '').slice(0, 120)}`
-      const ts = new Date(t.timestamp).getTime()
+      const ts = parseUTC(t.timestamp).getTime()
       const prev = seen.get(key)
       if (prev && Math.abs(ts - prev) < 5 * 60 * 1000) {
         continue
@@ -76,6 +101,11 @@ export const TradesPage: React.FC = () => {
     }
     return out
   }, [trades])
+
+  const detailConfidence = Number(
+    traceDetails?.decision?.confidence ?? traceDetails?.decision?.decision_json?.confidence ?? 0
+  )
+  const detailConfidencePct = Math.max(0, Math.min(100, detailConfidence * 100))
 
   const getStatusBadge = (status: string) => {
     const s = (status || 'unknown').toLowerCase()
@@ -211,12 +241,12 @@ export const TradesPage: React.FC = () => {
                   <section className="space-y-4">
                     <div className="flex items-center gap-2">
                       <Info size={14} className="text-blue-400" />
-                      <h3 className="text-[11px] font-black text-blue-400 uppercase tracking-widest">Strategic Rationale</h3>
+                      <h3 className="text-[11px] font-black text-blue-400 uppercase tracking-widest">Lý do chiến lược</h3>
                     </div>
                     <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/5 relative group">
                       <div className="absolute top-0 left-4 w-px h-full bg-gradient-to-b from-blue-500/40 via-blue-500/10 to-transparent"></div>
                       <p className="text-sm text-slate-300 leading-relaxed pl-6 italic font-medium">
-                        "{traceDetails.decision.rationale || traceDetails.decision.decision_json?.rationale || 'Neural network provided zero-sum rationale for this specific intent sequence.'}"
+                        "{viRationale(traceDetails.decision.rationale || traceDetails.decision.decision_json?.rationale || 'Chưa có phân tích cụ thể cho quyết định này.')}"
                       </p>
                     </div>
                   </section>
@@ -227,7 +257,7 @@ export const TradesPage: React.FC = () => {
                       <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest block mb-2">Market Regime</span>
                       <div className="flex items-center gap-2">
                         <Target size={14} className="text-amber-400" />
-                        <span className="text-sm font-black text-white uppercase">{traceDetails.decision.regime}</span>
+                        <span className="text-sm font-black text-white uppercase">{viRegime(traceDetails.decision.regime)}</span>
                       </div>
                     </div>
                     <div className="p-5 bg-white/5 rounded-2xl border border-white/5 group hover:border-blue-500/20 transition-colors">
@@ -236,10 +266,10 @@ export const TradesPage: React.FC = () => {
                         <div className="flex-grow h-1.5 bg-slate-800 rounded-full overflow-hidden">
                           <div
                             className="bg-blue-500 h-full shadow-[0_0_10px_rgba(59,130,246,0.6)]"
-                            style={{ width: `${(traceDetails.decision.confidence * 100)}%` }}
+                            style={{ width: `${detailConfidencePct}%` }}
                           ></div>
                         </div>
-                        <span className="text-xs font-black font-mono">{(traceDetails.decision.confidence * 100).toFixed(0)}%</span>
+                        <span className="text-xs font-black font-mono">{detailConfidencePct.toFixed(0)}%</span>
                       </div>
                     </div>
                   </div>
@@ -341,9 +371,9 @@ export const TradesPage: React.FC = () => {
                           <div key={ev.id || idx} className="flex items-center justify-between p-3 bg-white/[0.02] border border-white/5 rounded-xl group hover:bg-white/5 transition-colors">
                             <div className="flex items-center gap-3">
                               <div className={`w-1.5 h-1.5 rounded-full ${ev.level === 'INFO' ? 'bg-blue-400' : 'bg-rose-400'}`}></div>
-                              <span className="text-[10px] font-mono text-slate-300">{ev.code}</span>
+                              <span className="text-[10px] font-mono text-slate-300">{ev.message || ev.code || ev.details || 'EVENT'}</span>
                             </div>
-                            <span className="text-[9px] text-slate-600">{format(new Date(ev.timestamp), 'HH:mm:ss')}</span>
+                            <span className="text-[9px] text-slate-600">{formatVNTime(ev.timestamp)}</span>
                           </div>
                         ))}
                       </div>
