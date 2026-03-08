@@ -950,7 +950,8 @@ class TradingWorker:
             ex_symbols = sorted(set(ex_symbols))
 
             # Keep bounded universe for CPU/GPU stability
-            max_universe = max(30, settings.worker_ai_max_symbols_per_loop * 8)
+            # Tie ALL-universe size to ai loop capacity (avoid overloading local runner)
+            max_universe = max(8, settings.worker_ai_max_symbols_per_loop * 4)
             resolved = ex_symbols[:max_universe] if ex_symbols else [
                 "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT"
             ]
